@@ -22,6 +22,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+__version__ = "1.0.0"  # x-release-please-version
+
 DAY = 24 * 60 * 60
 RETENTION_SECONDS = 35 * DAY
 ALERT_COOLDOWN_SECONDS = 6 * 60 * 60
@@ -249,7 +251,7 @@ def post_discord(webhook_url: Optional[str], content: str) -> None:
             webhook_url,
             data=json.dumps({"content": chunk}).encode(),
             # Discord's edge rejects urllib's default User-Agent.
-            headers={"Content-Type": "application/json", "User-Agent": "omada-usage-monitor/1.0"},
+            headers={"Content-Type": "application/json", "User-Agent": f"omada-usage-monitor/{__version__}"},
             method="POST",
         )
         urllib.request.urlopen(request, timeout=30).close()
