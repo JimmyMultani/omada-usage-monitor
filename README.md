@@ -54,11 +54,34 @@ to stdout instead.
 In the controller: **Global View → Settings → Platform Integration → Open
 API → Add New App**. Choose **Client** mode and the read-only **Viewer**
 role, and give it access to the site you want to monitor. Note the
-**Client ID**, **Client Secret**, and the **Omada ID** (`omadacId`) shown on
-that page.
+**Client ID** and **Client Secret**.
 
-You also need the site ID. One way to get it is to call
-`GET /openapi/v1/{omadacId}/sites` with a token from the client above.
+Then look up the controller ID (`omadacId`) and site ID. `-k` skips
+certificate verification for a self-signed controller cert.
+
+```sh
+OMADA=https://omada.example.lan:8043
+CLIENT_ID=...
+CLIENT_SECRET=...
+
+# Controller ID: no auth needed.
+OMADAC_ID=$(curl -sk "$OMADA/api/info" | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["omadacId"])')
+echo "OMADA_OMADAC_ID=$OMADAC_ID"
+
+# Access token for the Open API client.
+TOKEN=$(curl -sk -X POST "$OMADA/openapi/authorize/token?grant_type=client_credentials" \
+  -H 'Content-Type: application/json' \
+  -d "{\"omadacId\": \"$OMADAC_ID\", \"client_id\": \"$CLIENT_ID\", \"client_secret\": \"$CLIENT_SECRET\"}" \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["accessToken"])')
+
+# Sites this client can see: use the siteId as OMADA_SITE_ID.
+curl -sk "$OMADA/openapi/v1/$OMADAC_ID/sites?page=1&pageSize=100" \
+  -H "Authorization: AccessToken=$TOKEN" \
+  | python3 -c 'import json, sys; [print(s["siteId"], s["name"]) for s in json.load(sys.stdin)["result"]["data"]]'
+```
+
+If a step prints a `KeyError`, run its `curl` alone to see the API's
+`errorCode` and `msg`.
 
 ### 2. Create a Discord webhook
 
@@ -178,14 +201,60 @@ In the container:
 docker compose run --rm omada-usage-monitor --report-now
 ```
 
-## Image tags
+## Troubleshooting
+
+Start with the container logs (`docker logs omada-usage-monitor`). Each
+successful poll logs `polled N clients`; each failure logs
+`poll failed (N in a row): <error>`.
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Exits at startup with `sqlite3.OperationalError: unable to open database file` | The bind-mounted data dir isn't writable by the container user (UID 10001) | `sudo chown 10001:10001 <data dir>`. Needed when moving from a setup that ran as root |
+| `poll failed ... No such file or directory: '/config/thresholds.json'` | Thresholds file not mounted | Mount it at `/config/thresholds.json`, or set `THRESHOLDS_PATH` |
+| `poll failed ... Omada API error ... on /openapi/authorize/token` | Wrong client ID, secret, or `OMADA_OMADAC_ID` | Re-check the Open API client and the [ID lookup](#1-create-an-omada-open-api-client) |
+| `poll failed ... Omada API error ... on /openapi/v1/.../clients` | Wrong `OMADA_SITE_ID`, or the Open API client has no access to that site | Check the site list from the ID lookup, and the client's site access in the controller |
+| `poll failed ... CERTIFICATE_VERIFY_FAILED` | `OMADA_STRICT_SSL=true` with a self-signed controller cert | Unset `OMADA_STRICT_SSL`, or give the controller a trusted cert |
+| `poll failed ... HTTP Error 401/403/404` from `discord.com` | Webhook deleted or URL wrong. A failed post fails the whole poll | Create a new webhook and update `DISCORD_WEBHOOK_URL` |
+| Container is `unhealthy` | No successful poll in `max(15 min, 3 × POLL_INTERVAL_SECONDS)` | See the `poll failed` lines in the logs |
+| Messages appear in the logs as `[discord dry-run]` instead of in Discord | `DISCORD_WEBHOOK_URL` is unset or empty | Set it |
+| A client never alerts | No limit applies: VLAN keys must be strings (`"20"`), and MACs must use Omada's `AA-BB-CC-DD-EE-FF` format | Fix `thresholds.json`. It's re-read every poll |
+
+After 6 failed polls in a row (~30 min at the default interval), the monitor
+posts a 🛑 alert to Discord (if the webhook works), and a ✅ when polling
+recovers.
+
+## Versioning and releases
+
+Releases follow [semantic versioning](https://semver.org/). Pin a major
+version (e.g. `:1`) to get fixes and features without breaking changes.
 
 | Tag | Updated on |
 |---|---|
-| `1.2.3`, `1.2`, `1`, `latest` | Release tags (`v1.2.3`) |
+| `1.2.3`, `1.2`, `1`, `latest` | Each release |
 | `edge`, `sha-<short>` | Every push to `main` |
 
-Pin a major version (e.g. `:1`) to get fixes without breaking changes.
+A **breaking change** (major bump) is anything that can break an existing
+deployment on upgrade:
+
+- renaming or removing an env var, or changing its default
+- an incompatible change to the thresholds file format
+- changing the container user's UID/GID, or the `/data` / `/config` paths
+- a SQLite schema change that loses existing history
+
+Releases are automated with
+[release-please](https://github.com/googleapis/release-please), driven by
+[Conventional Commits](https://www.conventionalcommits.org/) on `main`:
+
+1. Merge PRs to `main` with Conventional Commit titles (squash-merge). `fix:`
+   makes a patch release, `feat:` a minor release, and `feat!:` or a
+   `BREAKING CHANGE:` footer a major release. `docs:`, `chore:`, `ci:`,
+   etc. don't trigger a release.
+2. release-please keeps a `chore: Release X.Y.Z` PR open that bumps the
+   version and updates [`CHANGELOG.md`](CHANGELOG.md). Review the changelog
+   there. The PR is opened by GitHub Actions, so CI doesn't run on it, but
+   every commit in it has already passed CI on `main`.
+3. Merge the release PR. CI tags `vX.Y.Z`, creates the GitHub Release, and
+   publishes the image tags above.
 
 ## Development
 
