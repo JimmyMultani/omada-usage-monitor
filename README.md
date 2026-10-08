@@ -27,6 +27,8 @@ ghcr.io/jimmymultani/omada-usage-monitor
   `report_top_uploaders`, and any device first seen in the last 24 hours.
 - **🛑 / ✅ Monitor health:** a post when 6 polls in a row fail (~30 min of
   not seeing traffic), and another when polling recovers.
+- **⚠️ / ✅ Thresholds file problems:** a post listing problems in the
+  thresholds file when they first appear, and another once they're fixed.
 
 Each (client, alert type) pair posts at most once every 6 hours.
 
@@ -96,8 +98,9 @@ control.
 
 Copy [`thresholds.example.json`](thresholds.example.json) and adjust it (see
 [Thresholds](#thresholds)). Mount it at `/config/thresholds.json`. The file is
-re-read on every poll, so edits take effect without a restart. The file is
-required: polls fail until it's present.
+re-read on every poll, so edits take effect without a restart. Without the
+file, the monitor runs report-only: it records usage and posts the daily
+report, but sends no alerts.
 
 ### 4. Run it
 
@@ -178,11 +181,19 @@ than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
 - **`sustained_mbps`** is the per-poll rate limit, which must be exceeded for 3
   polls in a row. **`daily_gb`** is the rolling 24-hour total limit. Both take
   separate `up` and `down` values.
-- **`clients`** is keyed by MAC address in Omada's format (`AA-BB-CC-DD-EE-FF`,
-  uppercase, dashes). A client's keys override its VLAN's limits per
-  direction. Anything not overridden is inherited.
+- **`clients`** is keyed by MAC address. Lowercase and colons are fine; they're
+  normalized to Omada's `AA-BB-CC-DD-EE-FF`. A client's keys override its
+  VLAN's limits per direction. Anything not overridden is inherited.
 - A missing or `null` limit means "don't alert on this". A VLAN with no
   limits only appears in the daily report.
+- `note` is free text for your own records.
+
+The file is checked on every poll. Problems are logged and posted to Discord
+once, when they first appear (and again when they're fixed). These include
+unknown keys (e.g. a typo like `sustained_mpbs`), a malformed MAC, or a limit
+that isn't a non-negative number. A problem never stops polling: unknown
+keys and unusable limits are ignored, and an unreadable file means
+report-only until it's fixed.
 
 Start with loose limits that only catch obvious runaways, then tighten them
 once a week of daily reports shows real baselines.
@@ -210,14 +221,14 @@ successful poll logs `polled N clients`; each failure logs
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Exits at startup with `sqlite3.OperationalError: unable to open database file` | The bind-mounted data dir isn't writable by the container user (UID 10001) | `sudo chown 10001:10001 <data dir>`. Needed when moving from a setup that ran as root |
-| `poll failed ... No such file or directory: '/config/thresholds.json'` | Thresholds file not mounted | Mount it at `/config/thresholds.json`, or set `THRESHOLDS_PATH` |
+| `⚠️ Problems in the thresholds file` | The file is missing, isn't valid JSON, or has entries the monitor can't use. The message lists each one | Fix the listed entries, or mount the file at `/config/thresholds.json` (or set `THRESHOLDS_PATH`). A ✅ follows once it's fixed |
 | `poll failed ... Omada API error ... on /openapi/authorize/token` | Wrong client ID, secret, or `OMADA_OMADAC_ID` | Re-check the Open API client and the [ID lookup](#1-create-an-omada-open-api-client) |
 | `poll failed ... Omada API error ... on /openapi/v1/.../clients` | Wrong `OMADA_SITE_ID`, or the Open API client has no access to that site | Check the site list from the ID lookup, and the client's site access in the controller |
 | `poll failed ... CERTIFICATE_VERIFY_FAILED` | `OMADA_STRICT_SSL=true` with a self-signed controller cert | Unset `OMADA_STRICT_SSL`, or give the controller a trusted cert |
 | `poll failed ... HTTP Error 401/403/404` from `discord.com` | Webhook deleted or URL wrong. A failed post fails the whole poll | Create a new webhook and update `DISCORD_WEBHOOK_URL` |
 | Container is `unhealthy` | No successful poll in `max(15 min, 3 × POLL_INTERVAL_SECONDS)` | See the `poll failed` lines in the logs |
 | Messages appear in the logs as `[discord dry-run]` instead of in Discord | `DISCORD_WEBHOOK_URL` is unset or empty | Set it |
-| A client never alerts | No limit applies: VLAN keys must be strings (`"20"`), and MACs must use Omada's `AA-BB-CC-DD-EE-FF` format | Fix `thresholds.json`. It's re-read every poll |
+| A client never alerts | No limit applies to it: check its VLAN ID in the controller matches a `vlans` key, and any override's MAC matches the client | Fix `thresholds.json`. It's re-read every poll |
 
 After 6 failed polls in a row (~30 min at the default interval), the monitor
 posts a 🛑 alert to Discord (if the webhook works), and a ✅ when polling
@@ -261,8 +272,13 @@ Releases are automated with
 Python 3.9+ with no dependencies:
 
 ```sh
-python3 -m unittest test_monitor
+python3 -m unittest test_monitor   # unit tests
+ci/smoke_test.sh                   # build the image and run it against a fake Omada API (needs Docker)
 ```
+
+The smoke test checks that the container polls, raises a dry-run alert,
+runs as UID/GID 10001, and reports healthy. CI runs both on every PR and
+push, and only releases or publishes once both pass.
 
 ## License
 

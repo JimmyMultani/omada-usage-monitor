@@ -58,6 +58,65 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(monitor.limits_for(THRESHOLDS, "11-11-11-11-11-11", 0), {"sustained_mbps": {}, "daily_gb": {}})
 
 
+class LoadThresholdsTest(unittest.TestCase):
+    def load(self, content):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "thresholds.json")
+            with open(path, "w") as f:
+                f.write(content if isinstance(content, str) else json.dumps(content))
+            return monitor.load_thresholds(path)
+
+    def test_valid_file_has_no_problems(self):
+        self.assertEqual(self.load(THRESHOLDS), (THRESHOLDS, []))
+
+    def test_example_file_has_no_problems(self):
+        example = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thresholds.example.json")
+        self.assertEqual(monitor.load_thresholds(example)[1], [])
+
+    def test_missing_file_means_report_only(self):
+        thresholds, problems = monitor.load_thresholds("/nonexistent/thresholds.json")
+        self.assertEqual(thresholds, {})
+        self.assertEqual(problems, ["file not found; running report-only (no alerts)"])
+
+    def test_invalid_json_means_report_only(self):
+        thresholds, problems = self.load('{"vlans": {')
+        self.assertEqual(thresholds, {})
+        self.assertTrue(problems[0].startswith("not valid JSON"))
+
+    def test_client_macs_are_normalized(self):
+        thresholds, problems = self.load({"clients": {" aa:bb:cc:dd:ee:0f ": {"daily_gb": {"up": 1}}}})
+        self.assertEqual(problems, [])
+        self.assertEqual(thresholds["clients"], {"AA-BB-CC-DD-EE-0F": {"daily_gb": {"up": 1}}})
+
+    def test_unusable_values_are_dropped_and_reported(self):
+        thresholds, problems = self.load({
+            "vlan": {},
+            "vlans": {
+                "IoT": {"sustained_mpbs": {"up": 1}, "daily_gb": {"up": "5", "down": 500, "total": 1}},
+                "30": "report only",
+                "40": {"label": 40, "sustained_mbps": 10},
+            },
+            "clients": {"not-a-mac": {"daily_gb": {"up": True, "down": -1}}},
+        })
+        self.assertEqual(thresholds, {
+            "vlans": {"IoT": {"daily_gb": {"down": 500}}, "30": {}, "40": {}},
+            "clients": {"NOT-A-MAC": {"daily_gb": {}}},
+        })
+        self.assertEqual(problems, [
+            'unknown top-level key "vlan"; ignored',
+            'vlans["IoT"]: key must be a VLAN ID like "20"',
+            'vlans["IoT"]: unknown key "sustained_mpbs"; ignored',
+            'vlans["IoT"].daily_gb.up: must be a non-negative number or null; ignored',
+            'vlans["IoT"].daily_gb: unknown key "total"; ignored',
+            'vlans["30"]: must be an object; ignored',
+            'vlans["40"].label: must be a string; ignored',
+            'vlans["40"].sustained_mbps: must be an object like {"up": 10, "down": 100}; ignored',
+            'clients["not-a-mac"]: not a MAC address like "AA-BB-CC-DD-EE-FF"',
+            'clients["not-a-mac"].daily_gb.up: must be a non-negative number or null; ignored',
+            'clients["not-a-mac"].daily_gb.down: must be a non-negative number or null; ignored',
+        ])
+
+
 class AlertTest(unittest.TestCase):
     def setUp(self):
         self.db = monitor.open_db(":memory:")
@@ -131,17 +190,39 @@ class FakeOmada:
         return self.clients
 
 
+def make_config(data_dir, report_hour=0):
+    return monitor.Config(
+        base_url="", client_id="", client_secret="", omadac_id="", site_id="", strict_ssl=False,
+        webhook_url=None, db_path=":memory:", heartbeat_path=os.path.join(data_dir, "heartbeat"),
+        thresholds_path=os.path.join(data_dir, "thresholds.json"), poll_interval=INTERVAL, report_hour=report_hour,
+    )
+
+
 class RunOnceTest(unittest.TestCase):
+    def test_missing_thresholds_file_is_reported_once_and_polling_continues(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            config = make_config(data_dir, report_hour=24)  # never due
+            db = monitor.open_db(":memory:")
+            omada = FakeOmada()
+            with mock.patch.object(monitor, "post_discord") as post:
+                for i in range(3):
+                    omada.clients = [client(up=i * 10**9)]
+                    monitor.run_once(config, omada, db, 1_000_000 + i * INTERVAL)
+                post.assert_called_once()
+                self.assertIn("file not found", post.call_args[0][1])
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM samples").fetchone()[0], 2)
+
+                with open(config.thresholds_path, "w") as f:
+                    json.dump(THRESHOLDS, f)
+                monitor.run_once(config, omada, db, 1_000_000 + 3 * INTERVAL)
+                self.assertEqual(post.call_count, 2)
+                self.assertIn("no more problems", post.call_args[0][1])
+
     def test_daily_report_skipped_until_there_is_data(self):
         with tempfile.TemporaryDirectory() as data_dir:
-            thresholds_path = os.path.join(data_dir, "thresholds.json")
-            with open(thresholds_path, "w") as f:
+            config = make_config(data_dir)
+            with open(config.thresholds_path, "w") as f:
                 json.dump(THRESHOLDS, f)
-            config = monitor.Config(
-                base_url="", client_id="", client_secret="", omadac_id="", site_id="", strict_ssl=False,
-                webhook_url=None, db_path=":memory:", heartbeat_path=os.path.join(data_dir, "heartbeat"),
-                thresholds_path=thresholds_path, poll_interval=INTERVAL, report_hour=0,
-            )
             db = monitor.open_db(":memory:")
             omada = FakeOmada()
             omada.clients = [client()]
