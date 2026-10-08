@@ -280,6 +280,11 @@ The smoke test checks that the container polls, raises a dry-run alert,
 runs as UID/GID 10001, and reports healthy. CI runs both on every PR and
 push, and only releases or publishes once both pass.
 
+Dependabot opens weekly PRs for GitHub Actions updates (`ci:`) and for the
+base image, which is pinned by digest (`fix:`). Base image updates include
+security rebuilds of the same Python version, and each merged one becomes a
+patch release.
+
 ## License
 
 [MIT](LICENSE)
