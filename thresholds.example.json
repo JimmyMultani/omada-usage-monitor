@@ -1,0 +1,21 @@
+{
+  "vlans": {
+    "0": {
+      "label": "Default",
+      "report_top_uploaders": false
+    },
+    "20": {
+      "label": "IoT",
+      "report_top_uploaders": true,
+      "sustained_mbps": { "up": 10, "down": 100 },
+      "daily_gb": { "up": 100, "down": 500 }
+    }
+  },
+  "clients": {
+    "00-00-00-00-00-00": {
+      "note": "Example: a streaming box on the IoT VLAN that pulls from a local media server; no download limits",
+      "sustained_mbps": { "down": null },
+      "daily_gb": { "down": null }
+    }
+  }
+}
