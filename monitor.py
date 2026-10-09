@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import ssl
 import sys
@@ -32,6 +33,11 @@ SUSTAINED_POLLS = 3
 # controller" alert, so a silent monitor isn't mistaken for a quiet network.
 FAILURE_ALERT_POLLS = 6
 DISCORD_LIMIT = 2000
+
+LIMIT_KINDS = ("sustained_mbps", "daily_gb")
+VLAN_KEYS = {"label", "report_top_uploaders", *LIMIT_KINDS}
+CLIENT_KEYS = {"note", *LIMIT_KINDS}
+MAC_PATTERN = re.compile(r"[0-9A-F]{2}(-[0-9A-F]{2}){5}")
 
 
 @dataclass
@@ -191,9 +197,90 @@ def gb(byte_count: int) -> float:
     return byte_count / 1_000_000_000
 
 
-def load_thresholds(path: str) -> dict:
-    with open(path) as f:
-        return json.load(f)
+def load_thresholds(path: str) -> tuple[dict, list[str]]:
+    """The thresholds file, cleaned up, plus a list of problems found in it.
+
+    Problems never stop a poll. A missing or unreadable file means no limits
+    (usage is still recorded and reported), and an unusable entry or limit is
+    dropped rather than left to crash the alert checks. Client MACs are
+    normalized to Omada's AA-BB-CC-DD-EE-FF format.
+    """
+    report_only = "running report-only (no alerts)"
+    try:
+        with open(path) as f:
+            thresholds = json.load(f)
+    except FileNotFoundError:
+        return {}, [f"file not found; {report_only}"]
+    except ValueError as error:
+        return {}, [f"not valid JSON ({error}); {report_only}"]
+    if not isinstance(thresholds, dict):
+        return {}, [f"must be a JSON object; {report_only}"]
+
+    problems = [f'unknown top-level key "{key}"; ignored' for key in sorted(thresholds.keys() - {"vlans", "clients"})]
+    vlans, clients = {}, {}
+    for section, entries in (("vlans", vlans), ("clients", clients)):
+        raw = thresholds.get(section, {})
+        if not isinstance(raw, dict):
+            problems.append(f"{section}: must be an object; ignored")
+            continue
+        for key, entry in raw.items():
+            where = f'{section}["{key}"]'
+            if section == "vlans":
+                if not key.isdigit():
+                    problems.append(f'{where}: key must be a VLAN ID like "20"')
+                entries[key] = check_entry(where, entry, VLAN_KEYS, problems)
+            else:
+                mac = key.strip().upper().replace(":", "-")
+                if not MAC_PATTERN.fullmatch(mac):
+                    problems.append(f'{where}: not a MAC address like "AA-BB-CC-DD-EE-FF"')
+                entries[mac] = check_entry(where, entry, CLIENT_KEYS, problems)
+    return {"vlans": vlans, "clients": clients}, problems
+
+
+def check_entry(where: str, entry: object, allowed: set, problems: list[str]) -> dict:
+    """One VLAN or client entry with unusable values dropped, appending what
+    was wrong to `problems`."""
+    if not isinstance(entry, dict):
+        problems.append(f"{where}: must be an object; ignored")
+        return {}
+    problems += [f'{where}: unknown key "{key}"; ignored' for key in sorted(entry.keys() - allowed)]
+    clean = {key: value for key, value in entry.items() if key in allowed}
+    if "label" in clean and not isinstance(clean["label"], str):
+        problems.append(f"{where}.label: must be a string; ignored")
+        del clean["label"]
+    for kind in LIMIT_KINDS:
+        if kind not in clean:
+            continue
+        limits = clean[kind]
+        if not isinstance(limits, dict):
+            problems.append(f'{where}.{kind}: must be an object like {{"up": 10, "down": 100}}; ignored')
+            del clean[kind]
+            continue
+        clean[kind] = {}
+        for direction, limit in limits.items():
+            if direction not in ("up", "down"):
+                problems.append(f'{where}.{kind}: unknown key "{direction}"; ignored')
+            elif limit is not None and (isinstance(limit, bool) or not isinstance(limit, (int, float)) or limit < 0):
+                problems.append(f"{where}.{kind}.{direction}: must be a non-negative number or null; ignored")
+            else:
+                clean[kind][direction] = limit
+    return clean
+
+
+def report_threshold_problems(db: sqlite3.Connection, webhook_url: Optional[str], path: str, problems: list[str]) -> None:
+    """Log and post thresholds file problems when they change, rather than on
+    every poll, and post again once they're fixed."""
+    current = "\n".join(problems)
+    if current == (get_meta(db, "threshold_problems") or ""):
+        return
+    if problems:
+        message = f"⚠️ Problems in the thresholds file `{path}`:\n" + "\n".join(f"• {problem}" for problem in problems)
+    else:
+        message = f"✅ The thresholds file `{path}` has no more problems."
+    if webhook_url:  # In dry-run mode post_discord already prints it.
+        print(message, file=sys.stderr, flush=True)
+    post_discord(webhook_url, message)
+    set_meta(db, "threshold_problems", current)
 
 
 def vlan_label(thresholds: dict, vid: int) -> str:
@@ -401,9 +488,10 @@ def report_due(db: sqlite3.Connection, report_hour: int, now: int) -> bool:
 
 def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: int) -> None:
     max_gap = config.poll_interval * 2
-    thresholds = load_thresholds(config.thresholds_path)
+    thresholds, problems = load_thresholds(config.thresholds_path)
     clients = client.list_clients()
     record_poll(db, clients, now, max_gap)
+    report_threshold_problems(db, config.webhook_url, config.thresholds_path, problems)
     for message in check_alerts(db, clients, thresholds, now, config.poll_interval):
         post_discord(config.webhook_url, message)
     if report_due(db, config.report_hour, now):
@@ -428,7 +516,10 @@ def main() -> None:
     db = open_db(config.db_path)
 
     if args.report_now:
-        post_discord(config.webhook_url, build_report(db, load_thresholds(config.thresholds_path), int(time.time())))
+        thresholds, problems = load_thresholds(config.thresholds_path)
+        for problem in problems:
+            print(f"thresholds file {config.thresholds_path}: {problem}", file=sys.stderr, flush=True)
+        post_discord(config.webhook_url, build_report(db, thresholds, int(time.time())))
         return
 
     client = OmadaClient(config)

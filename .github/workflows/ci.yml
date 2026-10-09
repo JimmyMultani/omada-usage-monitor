@@ -27,7 +27,7 @@ jobs:
       - run: python -m unittest -v test_monitor
 
   release:
-    needs: test
+    needs: [test, smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -55,11 +55,11 @@ jobs:
           --add-label chore
 
   publish:
-    needs: [test, release]
+    needs: [test, smoke, release]
     # release is skipped on tag pushes; publish still runs for those.
     if: >-
       always() && github.event_name == 'push'
-      && needs.test.result == 'success'
+      && needs.test.result == 'success' && needs.smoke.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.release.result)
     runs-on: ubuntu-latest
     permissions:
@@ -97,3 +97,11 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Runs the built image against a fake Omada API; release and publish wait
+  # on it.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: ci/smoke_test.sh
