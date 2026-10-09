@@ -133,6 +133,15 @@ mkdir -p data && sudo chown 10001:10001 data
 
 Named volumes need no extra steps.
 
+To run as your own user instead (common on Synology and other NAS setups,
+to match an existing user's permissions), set `user:` in compose. Any UID/GID
+works, as long as it can write to the data directory. The thresholds file
+only needs to be readable.
+
+```yaml
+    user: "1028:100"   # e.g. a NAS user and its group, which owns ./data
+```
+
 ## Configuration
 
 | Env var | Default | Purpose |
@@ -263,7 +272,7 @@ successful poll logs `polled N clients`; each failure logs
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Exits at startup with `sqlite3.OperationalError: unable to open database file` | The bind-mounted data dir isn't writable by the container user (UID 10001) | `sudo chown 10001:10001 <data dir>`. Needed when moving from a setup that ran as root |
+| Exits at startup with `sqlite3.OperationalError: unable to open database file` | The bind-mounted data dir isn't writable by the container user (UID 10001, or your `user:` override) | `sudo chown 10001:10001 <data dir>` (or the `user:` override's UID/GID), or grant that user write access, e.g. with Synology ACLs. Needed when moving from a setup that ran as root |
 | `⚠️ Problems in the thresholds file` | The file is missing, isn't valid JSON, or has entries the monitor can't use. The message lists each one | Fix the listed entries, or mount the file at `/config/thresholds.json` (or set `THRESHOLDS_PATH`). A ✅ follows once it's fixed |
 | `poll failed ... Omada API error ... on /openapi/authorize/token` | Wrong client ID, secret, or `OMADA_OMADAC_ID` | Re-check the Open API client and the [ID lookup](#1-create-an-omada-open-api-client) |
 | `poll failed ... Omada API error ... on /openapi/v1/.../clients` | Wrong `OMADA_SITE_ID`, or the Open API client has no access to that site | Check the site list from the ID lookup, and the client's site access in the controller |
@@ -320,8 +329,10 @@ ci/smoke_test.sh                   # build the image and run it against a fake O
 ```
 
 The smoke test checks that the container polls, raises a dry-run alert,
-serves `/metrics`, runs as UID/GID 10001, and reports healthy. CI runs both
-on every PR and push, and only releases or publishes once both pass. Unit
+serves `/metrics`, runs as UID/GID 10001, and reports healthy. It also runs a
+second container with a `user:` override (`1028:100`) to check that setup
+keeps working. CI runs both on every PR and push, and only releases or
+publishes once both pass. Unit
 tests run on Python 3.9 and on the Dockerfile's base image, so the shipped
 Python version is set in one place: the `FROM` line.
 
