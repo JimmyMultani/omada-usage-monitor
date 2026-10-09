@@ -17,10 +17,12 @@ import re
 import sqlite3
 import ssl
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 __version__ = "1.0.0"  # x-release-please-version
@@ -54,6 +56,7 @@ class Config:
     thresholds_path: str
     poll_interval: int
     report_hour: int
+    metrics_port: Optional[int] = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -78,6 +81,7 @@ class Config:
             thresholds_path=os.environ.get("THRESHOLDS_PATH", os.path.join(here, "thresholds.json")),
             poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "300")),
             report_hour=int(os.environ.get("DAILY_REPORT_HOUR", "8")),
+            metrics_port=int(os.environ["METRICS_PORT"]) if os.environ.get("METRICS_PORT") else None,
         )
 
 
@@ -483,10 +487,107 @@ def report_due(db: sqlite3.Connection, report_hour: int, now: int) -> bool:
     return local.tm_hour >= report_hour and get_meta(db, "last_report_date") != time.strftime("%Y-%m-%d", local)
 
 
+# --- Prometheus metrics -----------------------------------------------------
+
+
+class Metrics:
+    """What the optional /metrics endpoint serves. The poll loop records into
+    it and the HTTP server thread renders it, so the server never touches
+    SQLite (whose connection belongs to the poll thread)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.clients: list[dict] = []
+        self.polls = {"success": 0, "failure": 0}
+        self.consecutive_failures = 0
+        self.last_success: Optional[int] = None
+
+    def record_success(self, clients: list[dict], now: int) -> None:
+        with self.lock:
+            self.clients = clients
+            self.polls["success"] += 1
+            self.consecutive_failures = 0
+            self.last_success = now
+
+    def record_failure(self) -> None:
+        with self.lock:
+            self.polls["failure"] += 1
+            self.consecutive_failures += 1
+
+    def render(self) -> str:
+        with self.lock:
+            clients, polls = list(self.clients), dict(self.polls)
+            consecutive_failures, last_success = self.consecutive_failures, self.last_success
+
+        lines = []
+
+        def metric(name: str, kind: str, help_text: str, samples: list[tuple[dict, float]]) -> None:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {kind}")
+            for labels, value in samples:
+                label_text = ",".join(f'{key}="{escape_label(str(val))}"' for key, val in labels.items())
+                lines.append(f"{name}{{{label_text}}} {value}" if labels else f"{name} {value}")
+
+        metric("omada_usage_monitor_info", "gauge", "Monitor version.", [({"version": __version__}, 1)])
+        metric(
+            "omada_usage_monitor_polls_total", "counter", "Polls of the Omada controller, by result.",
+            [({"result": result}, count) for result, count in polls.items()],
+        )
+        metric(
+            "omada_usage_monitor_consecutive_poll_failures", "gauge", "Failed polls since the last successful one.",
+            [({}, consecutive_failures)],
+        )
+        if last_success is not None:
+            metric(
+                "omada_usage_monitor_last_success_timestamp_seconds", "gauge", "Unix time of the last successful poll.",
+                [({}, last_success)],
+            )
+        metric("omada_usage_monitor_clients", "gauge", "Clients seen in the last successful poll.", [({}, len(clients))])
+
+        def client_labels(client: dict) -> dict:
+            return {"mac": client["mac"], "name": client.get("name") or "", "vlan": client.get("vid") or 0}
+
+        for direction, field, verb in (("upload", "trafficUp", "sent"), ("download", "trafficDown", "received")):
+            metric(
+                f"omada_client_{direction}_bytes_total", "counter",
+                f"Bytes the client has {verb}, including LAN traffic. Omada resets it when the client reconnects.",
+                [(client_labels(client), client.get(field) or 0) for client in clients],
+            )
+        return "\n".join(lines) + "\n"
+
+
+def escape_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def serve_metrics(metrics: Metrics, port: int) -> ThreadingHTTPServer:
+    """Serve `metrics` at /metrics on a background thread."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.split("?")[0] != "/metrics":
+                self.send_error(404)
+                return
+            body = metrics.render().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass  # One line per scrape would drown out the poll log.
+
+    server = ThreadingHTTPServer(("", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 # --- Main loop --------------------------------------------------------------
 
 
-def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: int) -> None:
+def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: int) -> list[dict]:
+    """One poll; returns the clients it saw."""
     max_gap = config.poll_interval * 2
     thresholds, problems = load_thresholds(config.thresholds_path)
     clients = client.list_clients()
@@ -504,6 +605,7 @@ def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: i
     with open(config.heartbeat_path, "w") as f:
         f.write(str(now))
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} polled {len(clients)} clients", flush=True)
+    return clients
 
 
 def main() -> None:
@@ -523,10 +625,15 @@ def main() -> None:
         return
 
     client = OmadaClient(config)
+    metrics = Metrics()
+    if config.metrics_port is not None and not args.once:
+        serve_metrics(metrics, config.metrics_port)
+        print(f"serving Prometheus metrics on :{config.metrics_port}/metrics", flush=True)
     failures = 0
     while True:
         try:
-            run_once(config, client, db, int(time.time()))
+            now = int(time.time())
+            metrics.record_success(run_once(config, client, db, now), now)
             if failures >= FAILURE_ALERT_POLLS:
                 post_discord(config.webhook_url, "✅ Usage monitor is reaching the Omada controller again.")
             failures = 0
@@ -534,6 +641,7 @@ def main() -> None:
             if args.once:
                 raise
             db.rollback()
+            metrics.record_failure()
             failures += 1
             print(f"poll failed ({failures} in a row): {error}", file=sys.stderr, flush=True)
             if failures == FAILURE_ALERT_POLLS:

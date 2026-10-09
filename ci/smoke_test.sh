@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the image and runs it against a fake Omada API, checking that it
-# polls, raises a (dry-run) alert, runs as the documented non-root user, and
-# reports healthy.
+# polls, raises a (dry-run) alert, serves Prometheus metrics, runs as the
+# documented non-root user, and reports healthy.
 set -euo pipefail
 
 image=omada-usage-monitor:smoke
@@ -27,6 +27,7 @@ docker run -d --name "$name" \
   -e OMADA_CLIENT_ID=smoke -e OMADA_CLIENT_SECRET=smoke \
   -e OMADA_OMADAC_ID=smoke -e OMADA_SITE_ID=smoke \
   -e POLL_INTERVAL_SECONDS=5 \
+  -e METRICS_PORT=9877 \
   -v "$root/thresholds.example.json:/config/thresholds.json:ro" \
   "$image" > /dev/null
 
@@ -54,12 +55,18 @@ wait_for() {
   fail "timed out waiting for $description"
 }
 
+metrics_show_camera() {
+  grep -q '^omada_client_upload_bytes_total{mac="02-00-00-00-00-01",name="Smoke Camera",vlan="20"} [1-9]' \
+    <<< "$(docker exec "$name" wget -qO- http://127.0.0.1:9877/metrics)"
+}
+
 is_healthy() {
   [ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" = healthy ]
 }
 
 wait_for "a successful poll" logs_contain "polled 2 clients"
 wait_for "a sustained upload alert" logs_contain "Smoke Camera.*has been uploading"
+wait_for "the camera in /metrics" metrics_show_camera
 wait_for "a healthy status" is_healthy
 
 user=$(docker exec "$name" id -u):$(docker exec "$name" id -g)
