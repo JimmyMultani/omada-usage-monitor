@@ -75,7 +75,10 @@ wait_for "the camera in /metrics" metrics_match \
 wait_for "a healthy status" is_healthy
 
 # Prometheus's own parser and linter, rather than our idea of the format.
-if ! promtool_output=$(scrape | docker run --rm -i --entrypoint promtool prom/prometheus:v3.15.0 check metrics 2>&1); then
+# promtool accepts empty input, so make sure there's something to check.
+metrics=$(scrape)
+grep -q '^omada_client_upload_bytes_total{' <<< "$metrics" || fail "/metrics has no client metrics: $metrics"
+if ! promtool_output=$(docker run --rm -i --entrypoint promtool prom/prometheus:v3.15.0 check metrics <<< "$metrics" 2>&1); then
   fail "promtool check metrics: $promtool_output"
 fi
 echo "ok: promtool accepts /metrics"
