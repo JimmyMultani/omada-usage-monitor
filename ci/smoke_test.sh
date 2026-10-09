@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the image and runs it against a fake Omada API, checking that it
-# polls, raises a (dry-run) alert, serves Prometheus metrics, runs as the
-# documented non-root user, and reports healthy.
+# polls, raises a (dry-run) alert, serves Prometheus metrics that promtool
+# accepts, runs as the documented non-root user, reports healthy, and reports
+# failed polls in its metrics once the API goes away.
 set -euo pipefail
 
 image=omada-usage-monitor:smoke
@@ -55,9 +56,12 @@ wait_for() {
   fail "timed out waiting for $description"
 }
 
-metrics_show_camera() {
-  grep -q '^omada_client_upload_bytes_total{mac="02-00-00-00-00-01",name="Smoke Camera",vlan="20"} [1-9]' \
-    <<< "$(docker exec "$name" wget -qO- http://127.0.0.1:9877/metrics)"
+scrape() {
+  docker exec "$name" wget -qO- http://127.0.0.1:9877/metrics
+}
+
+metrics_match() {
+  grep -q "$1" <<< "$(scrape)"
 }
 
 is_healthy() {
@@ -66,12 +70,24 @@ is_healthy() {
 
 wait_for "a successful poll" logs_contain "polled 2 clients"
 wait_for "a sustained upload alert" logs_contain "Smoke Camera.*has been uploading"
-wait_for "the camera in /metrics" metrics_show_camera
+wait_for "the camera in /metrics" metrics_match \
+  '^omada_client_upload_bytes_total{mac="02-00-00-00-00-01",name="Smoke Camera",vlan="20"} [1-9]'
 wait_for "a healthy status" is_healthy
+
+# Prometheus's own parser and linter, rather than our idea of the format.
+if ! promtool_output=$(scrape | docker run --rm -i --entrypoint promtool prom/prometheus:v3.15.0 check metrics 2>&1); then
+  fail "promtool check metrics: $promtool_output"
+fi
+echo "ok: promtool accepts /metrics"
 
 user=$(docker exec "$name" id -u):$(docker exec "$name" id -g)
 [ "$user" = 10001:10001 ] || fail "expected to run as 10001:10001, got $user"
 if logs_contain "poll failed"; then fail "a poll failed"; fi
 if logs_contain "Problems in the thresholds file"; then fail "thresholds.example.json has problems"; fi
+
+# Last: take the controller away and check failures reach /metrics.
+kill "$fake_pid"
+wait_for "failed polls in /metrics" metrics_match '^omada_usage_monitor_polls_total{result="failure"} [1-9]'
+wait_for "consecutive failures in /metrics" metrics_match '^omada_usage_monitor_consecutive_poll_failures [1-9]'
 
 echo "smoke test passed"
