@@ -23,7 +23,7 @@ jobs:
         python: ["3.9", "3.13"]
     container: python:${{ matrix.python }}-slim
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: python -m unittest -v test_monitor
 
   release:
@@ -39,14 +39,18 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
-        uses: googleapis/release-please-action@v4
-      - if: steps.release.outputs.pr
+        uses: googleapis/release-please-action@v5
+      # The PR number goes through env, which is only evaluated when the step
+      # runs; in `run:` it's also evaluated for the skipped step's display name.
+      - name: Assign and label release PR
+        if: steps.release.outputs.pr
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
         run: >-
-          gh pr edit ${{ fromJSON(steps.release.outputs.pr).number }}
-          --repo ${{ github.repository }}
-          --add-assignee ${{ github.repository_owner }}
+          gh pr edit "$PR_NUMBER"
+          --repo "$GITHUB_REPOSITORY"
+          --add-assignee "$GITHUB_REPOSITORY_OWNER"
           --add-label chore
 
   publish:
@@ -61,16 +65,16 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
@@ -83,7 +87,7 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || needs.release.outputs.release_created == 'true' }}
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
