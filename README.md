@@ -148,6 +148,7 @@ Named volumes need no extra steps.
 | `DAILY_REPORT_HOUR` | `8` | Local hour (per `TZ`) after which the daily report is posted |
 | `DATA_DIR` | `/data` | SQLite history (35-day retention) and the healthcheck heartbeat |
 | `THRESHOLDS_PATH` | `/config/thresholds.json` | Thresholds file |
+| `METRICS_PORT` | unset | Serve [Prometheus metrics](#prometheus-metrics) at `/metrics` on this port. Unset = no HTTP server |
 
 The image's healthcheck passes while the last successful poll is more recent
 than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
@@ -197,6 +198,48 @@ report-only until it's fixed.
 
 Start with loose limits that only catch obvious runaways, then tighten them
 once a week of daily reports shows real baselines.
+
+## Prometheus metrics
+
+Set `METRICS_PORT` (e.g. `9877`) to serve metrics at `/metrics` for
+Prometheus and Grafana. Publish the port in compose (`ports: ["9877:9877"]`)
+if Prometheus runs outside the container's network.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `omada_client_upload_bytes_total` | counter | `mac`, `name`, `vlan` |
+| `omada_client_download_bytes_total` | counter | `mac`, `name`, `vlan` |
+| `omada_usage_monitor_polls_total` | counter | `result` (`success`, `failure`) |
+| `omada_usage_monitor_consecutive_poll_failures` | gauge | |
+| `omada_usage_monitor_last_success_timestamp_seconds` | gauge | |
+| `omada_usage_monitor_clients` | gauge | |
+| `omada_usage_monitor_info` | gauge | `version` |
+
+The client metrics are Omada's own per-client counters from the latest
+poll, so they share the [caveats](#caveats-reading-the-numbers):
+they include LAN traffic and reset when a client reconnects. `rate()` and
+`increase()` handle the resets. Values only change once per poll, so use a
+range of at least twice `POLL_INTERVAL_SECONDS`:
+
+```promql
+# Upload rate in Mbps, per client
+rate(omada_client_upload_bytes_total[15m]) * 8 / 1e6
+
+# Top 10 downloaders over the last day, in GB
+topk(10, increase(omada_client_download_bytes_total[1d]) / 1e9)
+
+# Monitor stopped seeing traffic
+time() - omada_usage_monitor_last_success_timestamp_seconds > 900
+```
+
+Clients that drop off the network disappear from the output, and their
+series go stale. After a failed poll, all client metrics are left out until
+the next successful one, so an outage shows as a gap in graphs rather than
+as zero traffic. The `omada_usage_monitor_*` metrics are always present, so
+failures stay visible.
+
+The endpoint has no authentication and exposes client names and MAC
+addresses, so only publish it on a trusted network.
 
 ## CLI
 
@@ -277,10 +320,10 @@ ci/smoke_test.sh                   # build the image and run it against a fake O
 ```
 
 The smoke test checks that the container polls, raises a dry-run alert,
-runs as UID/GID 10001, and reports healthy. CI runs both on every PR and
-push, and only releases or publishes once both pass. Unit tests run on
-Python 3.9 and on the Dockerfile's base image, so the shipped Python version
-is set in one place: the `FROM` line.
+serves `/metrics`, runs as UID/GID 10001, and reports healthy. CI runs both
+on every PR and push, and only releases or publishes once both pass. Unit
+tests run on Python 3.9 and on the Dockerfile's base image, so the shipped
+Python version is set in one place: the `FROM` line.
 
 Dependabot opens weekly PRs for GitHub Actions updates (`ci:`) and for the
 base image, which is pinned by digest (`fix:`). Base image updates include

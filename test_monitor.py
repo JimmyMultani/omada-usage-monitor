@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
 
 import monitor
@@ -236,6 +238,56 @@ class RunOnceTest(unittest.TestCase):
                 monitor.run_once(config, omada, db, 1_000_000 + INTERVAL)
                 post.assert_called_once()
                 self.assertIn("Daily usage report", post.call_args[0][1])
+
+
+class MetricsTest(unittest.TestCase):
+    def test_render_includes_clients_and_poll_health(self):
+        metrics = monitor.Metrics()
+        metrics.record_failure()
+        metrics.record_success([client(name='Bob\'s "TV"\\', up=5, down=7)], 1_000_000)
+        lines = metrics.render().splitlines()
+        for expected in [
+            f'omada_usage_monitor_info{{version="{monitor.__version__}"}} 1',
+            'omada_usage_monitor_polls_total{result="success"} 1',
+            'omada_usage_monitor_polls_total{result="failure"} 1',
+            "omada_usage_monitor_consecutive_poll_failures 0",
+            "omada_usage_monitor_last_success_timestamp_seconds 1000000",
+            "omada_usage_monitor_clients 1",
+            'omada_client_upload_bytes_total{mac="11-11-11-11-11-11",name="Bob\'s \\"TV\\"\\\\",vlan="20"} 5',
+            'omada_client_download_bytes_total{mac="11-11-11-11-11-11",name="Bob\'s \\"TV\\"\\\\",vlan="20"} 7',
+            "# TYPE omada_client_upload_bytes_total counter",
+        ]:
+            self.assertIn(expected, lines)
+
+    def test_failed_poll_drops_client_series_but_keeps_poll_health(self):
+        metrics = monitor.Metrics()
+        metrics.record_success([client(up=5)], 1_000_000)
+        metrics.record_failure()
+        lines = metrics.render().splitlines()
+        self.assertFalse([line for line in lines if line.startswith("omada_client_")])
+        self.assertIn("# TYPE omada_client_upload_bytes_total counter", lines)
+        for expected in [
+            "omada_usage_monitor_consecutive_poll_failures 1",
+            "omada_usage_monitor_last_success_timestamp_seconds 1000000",
+            "omada_usage_monitor_clients 1",
+        ]:
+            self.assertIn(expected, lines)
+
+    def test_no_last_success_before_first_poll(self):
+        self.assertNotIn("last_success", monitor.Metrics().render())
+
+    def test_server_serves_metrics_and_404s_elsewhere(self):
+        server = monitor.serve_metrics(monitor.Metrics(), 0)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with urllib.request.urlopen(f"{base}/metrics", timeout=5) as response:
+            self.assertEqual(response.headers["Content-Type"], "text/plain; version=0.0.4; charset=utf-8")
+            self.assertIn("omada_usage_monitor_info", response.read().decode())
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(f"{base}/", timeout=5)
+        self.assertEqual(error.exception.code, 404)
+        error.exception.close()
 
 
 class SplitMessageTest(unittest.TestCase):
