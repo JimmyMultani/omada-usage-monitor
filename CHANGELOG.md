@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.0.0...v1.1.0) (2026-10-09)
+
+
+### Features
+
+* Add optional Prometheus metrics endpoint ([#11](https://github.com/JimmyMultani/omada-usage-monitor/issues/11)) ([527ffef](https://github.com/JimmyMultani/omada-usage-monitor/commit/527ffef79e263fcacd9e4bf68d03668e73b9941e))
+* Validate thresholds file and run report-only without one ([#3](https://github.com/JimmyMultani/omada-usage-monitor/issues/3)) ([4377f73](https://github.com/JimmyMultani/omada-usage-monitor/commit/4377f7377acb2d952196f1979441e7ea51f38a0a))
+
+
+### Bug Fixes
+
+* bump python from 3.13-alpine to 3.14-alpine ([#13](https://github.com/JimmyMultani/omada-usage-monitor/issues/13)) ([8a62a33](https://github.com/JimmyMultani/omada-usage-monitor/commit/8a62a33f5203f5a91215b313f9470e54d45165e3))
+
 ## [1.0.0](https://github.com/JimmyMultani/omada-usage-monitor/releases/tag/v1.0.0) (2026-10-08)
 
 ### Features
