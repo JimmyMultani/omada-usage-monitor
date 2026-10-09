@@ -92,5 +92,7 @@ if logs_contain "Problems in the thresholds file"; then fail "thresholds.example
 kill "$fake_pid"
 wait_for "failed polls in /metrics" metrics_match '^omada_usage_monitor_polls_total{result="failure"} [1-9]'
 wait_for "consecutive failures in /metrics" metrics_match '^omada_usage_monitor_consecutive_poll_failures [1-9]'
+if metrics_match '^omada_client_'; then fail "client metrics still served after a failed poll"; fi
+echo "ok: client metrics dropped after a failed poll"
 
 echo "smoke test passed"

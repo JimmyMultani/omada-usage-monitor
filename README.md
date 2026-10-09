@@ -215,8 +215,8 @@ if Prometheus runs outside the container's network.
 | `omada_usage_monitor_clients` | gauge | |
 | `omada_usage_monitor_info` | gauge | `version` |
 
-The client metrics are Omada's own per-client counters from the last
-successful poll, so they share the [caveats](#caveats-reading-the-numbers):
+The client metrics are Omada's own per-client counters from the latest
+poll, so they share the [caveats](#caveats-reading-the-numbers):
 they include LAN traffic and reset when a client reconnects. `rate()` and
 `increase()` handle the resets. Values only change once per poll, so use a
 range of at least twice `POLL_INTERVAL_SECONDS`:
@@ -233,7 +233,10 @@ time() - omada_usage_monitor_last_success_timestamp_seconds > 900
 ```
 
 Clients that drop off the network disappear from the output, and their
-series go stale.
+series go stale. After a failed poll, all client metrics are left out until
+the next successful one, so an outage shows as a gap in graphs rather than
+as zero traffic. The `omada_usage_monitor_*` metrics are always present, so
+failures stay visible.
 
 The endpoint has no authentication and exposes client names and MAC
 addresses, so only publish it on a trusted network.

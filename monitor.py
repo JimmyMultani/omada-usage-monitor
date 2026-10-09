@@ -498,6 +498,7 @@ class Metrics:
     def __init__(self):
         self.lock = threading.Lock()
         self.clients: list[dict] = []
+        self.client_count = 0
         self.polls = {"success": 0, "failure": 0}
         self.consecutive_failures = 0
         self.last_success: Optional[int] = None
@@ -505,18 +506,22 @@ class Metrics:
     def record_success(self, clients: list[dict], now: int) -> None:
         with self.lock:
             self.clients = clients
+            self.client_count = len(clients)
             self.polls["success"] += 1
             self.consecutive_failures = 0
             self.last_success = now
 
     def record_failure(self) -> None:
         with self.lock:
+            # Drop the per-client series so an outage shows as a gap in
+            # graphs, rather than stale counters that read as zero traffic.
+            self.clients = []
             self.polls["failure"] += 1
             self.consecutive_failures += 1
 
     def render(self) -> str:
         with self.lock:
-            clients, polls = list(self.clients), dict(self.polls)
+            clients, client_count, polls = list(self.clients), self.client_count, dict(self.polls)
             consecutive_failures, last_success = self.consecutive_failures, self.last_success
 
         lines = []
@@ -542,7 +547,7 @@ class Metrics:
                 "omada_usage_monitor_last_success_timestamp_seconds", "gauge", "Unix time of the last successful poll.",
                 [({}, last_success)],
             )
-        metric("omada_usage_monitor_clients", "gauge", "Clients seen in the last successful poll.", [({}, len(clients))])
+        metric("omada_usage_monitor_clients", "gauge", "Clients seen in the last successful poll.", [({}, client_count)])
 
         def client_labels(client: dict) -> dict:
             return {"mac": client["mac"], "name": client.get("name") or "", "vlan": client.get("vid") or 0}

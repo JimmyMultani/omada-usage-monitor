@@ -243,14 +243,14 @@ class RunOnceTest(unittest.TestCase):
 class MetricsTest(unittest.TestCase):
     def test_render_includes_clients_and_poll_health(self):
         metrics = monitor.Metrics()
-        metrics.record_success([client(name='Bob\'s "TV"\\', up=5, down=7)], 1_000_000)
         metrics.record_failure()
+        metrics.record_success([client(name='Bob\'s "TV"\\', up=5, down=7)], 1_000_000)
         lines = metrics.render().splitlines()
         for expected in [
             f'omada_usage_monitor_info{{version="{monitor.__version__}"}} 1',
             'omada_usage_monitor_polls_total{result="success"} 1',
             'omada_usage_monitor_polls_total{result="failure"} 1',
-            "omada_usage_monitor_consecutive_poll_failures 1",
+            "omada_usage_monitor_consecutive_poll_failures 0",
             "omada_usage_monitor_last_success_timestamp_seconds 1000000",
             "omada_usage_monitor_clients 1",
             'omada_client_upload_bytes_total{mac="11-11-11-11-11-11",name="Bob\'s \\"TV\\"\\\\",vlan="20"} 5',
@@ -259,11 +259,19 @@ class MetricsTest(unittest.TestCase):
         ]:
             self.assertIn(expected, lines)
 
-    def test_success_resets_consecutive_failures(self):
+    def test_failed_poll_drops_client_series_but_keeps_poll_health(self):
         metrics = monitor.Metrics()
+        metrics.record_success([client(up=5)], 1_000_000)
         metrics.record_failure()
-        metrics.record_success([], 1_000_000)
-        self.assertIn("omada_usage_monitor_consecutive_poll_failures 0", metrics.render().splitlines())
+        lines = metrics.render().splitlines()
+        self.assertFalse([line for line in lines if line.startswith("omada_client_")])
+        self.assertIn("# TYPE omada_client_upload_bytes_total counter", lines)
+        for expected in [
+            "omada_usage_monitor_consecutive_poll_failures 1",
+            "omada_usage_monitor_last_success_timestamp_seconds 1000000",
+            "omada_usage_monitor_clients 1",
+        ]:
+            self.assertIn(expected, lines)
 
     def test_no_last_success_before_first_poll(self):
         self.assertNotIn("last_success", monitor.Metrics().render())
