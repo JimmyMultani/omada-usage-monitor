@@ -278,7 +278,9 @@ ci/smoke_test.sh                   # build the image and run it against a fake O
 
 The smoke test checks that the container polls, raises a dry-run alert,
 runs as UID/GID 10001, and reports healthy. CI runs both on every PR and
-push, and only releases or publishes once both pass.
+push, and only releases or publishes once both pass. Unit tests run on
+Python 3.9 and on the Dockerfile's base image, so the shipped Python version
+is set in one place: the `FROM` line.
 
 Dependabot opens weekly PRs for GitHub Actions updates (`ci:`) and for the
 base image, which is pinned by digest (`fix:`). Base image updates include

@@ -17,14 +17,20 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # 3.9 is the oldest supported (local dev); 3.13 is what the image ships.
-        python: ["3.9", "3.13"]
-    container: python:${{ matrix.python }}-slim
     steps:
       - uses: actions/checkout@v7
-      - run: python -m unittest -v test_monitor
+      - name: Unit tests on Python 3.9 (oldest supported)
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" -w /src -e PYTHONDONTWRITEBYTECODE=1
+          python:3.9-slim python -m unittest -v test_monitor
+      # The Dockerfile's FROM line is the only place the shipped Python version
+      # lives, so a base image bump (e.g. from Dependabot) is tested on the
+      # exact image it ships.
+      - name: Unit tests on the image's base
+        if: success() || failure()
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" -w /src -e PYTHONDONTWRITEBYTECODE=1
+          "$(awk '/^FROM /{print $2; exit}' Dockerfile)" python -m unittest -v test_monitor
 
   release:
     needs: [test, smoke]
