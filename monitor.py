@@ -35,9 +35,13 @@ SUSTAINED_POLLS = 3
 # controller" alert, so a silent monitor isn't mistaken for a quiet network.
 FAILURE_ALERT_POLLS = 6
 DISCORD_LIMIT = 2000
+# Devices first seen this soon after the monitor's very first poll were
+# already on the network, so they're never treated as new.
+NEW_DEVICE_GRACE_SECONDS = 600
 
 LIMIT_KINDS = ("sustained_mbps", "daily_gb")
-VLAN_KEYS = {"label", "report_top_uploaders", *LIMIT_KINDS}
+VLAN_FLAGS = ("report_top_uploaders", "alert_new_devices")
+VLAN_KEYS = {"label", *VLAN_FLAGS, *LIMIT_KINDS}
 CLIENT_KEYS = {"note", *LIMIT_KINDS}
 MAC_PATTERN = re.compile(r"[0-9A-F]{2}(-[0-9A-F]{2}){5}")
 
@@ -252,6 +256,10 @@ def check_entry(where: str, entry: object, allowed: set, problems: list[str]) ->
     if "label" in clean and not isinstance(clean["label"], str):
         problems.append(f"{where}.label: must be a string; ignored")
         del clean["label"]
+    for flag in VLAN_FLAGS:
+        if flag in clean and not isinstance(clean[flag], bool):
+            problems.append(f"{where}.{flag}: must be true or false; ignored")
+            del clean[flag]
     for kind in LIMIT_KINDS:
         if kind not in clean:
             continue
@@ -423,6 +431,34 @@ def check_alerts(db: sqlite3.Connection, clients: list[dict], thresholds: dict, 
     return messages
 
 
+def new_device_alerts(db: sqlite3.Connection, clients: list[dict], thresholds: dict, now: int) -> list[str]:
+    """A post for each client first seen in this poll on a VLAN with
+    `alert_new_devices` set. Call after record_poll, which records first
+    sightings."""
+    started = db.execute("SELECT MIN(ts) FROM first_seen").fetchone()[0]
+    if started is None or now <= started + NEW_DEVICE_GRACE_SECONDS:
+        return []
+    watched = {vid for vid, vlan in thresholds.get("vlans", {}).items() if vlan.get("alert_new_devices")}
+    messages = []
+    for client in clients:
+        if str(client.get("vid") or 0) not in watched:
+            continue
+        first_seen = db.execute("SELECT ts FROM first_seen WHERE mac = ?", (client["mac"],)).fetchone()[0]
+        if first_seen == now:
+            note = (
+                "\nIts MAC is randomized (locally administered), so it may be a known device using a private address."
+                if is_randomized_mac(client["mac"]) else ""
+            )
+            messages.append(f"🆕 New device joined: {describe(client, thresholds)}{note}")
+    return messages
+
+
+def is_randomized_mac(mac: str) -> bool:
+    """Phones and laptops use random, "locally administered" MACs for privacy;
+    those have the second-lowest bit of the first octet set."""
+    return mac[1:2].upper() in ("2", "6", "A", "E")
+
+
 def claim_alert(db: sqlite3.Connection, mac: str, kind: str, now: int) -> bool:
     """True (and records the alert) unless the same alert fired within the cooldown."""
     row = db.execute("SELECT ts FROM alerts WHERE mac = ? AND kind = ?", (mac, kind)).fetchone()
@@ -473,12 +509,15 @@ def build_report(db: sqlite3.Connection, thresholds: dict, now: int) -> str:
         parts += [f"**Top {labels} uploaders**", table(top_uploaders)]
 
     new_devices = db.execute(
-        "SELECT name, ip, mac, vid FROM first_seen WHERE ts > ? AND ts > (SELECT MIN(ts) FROM first_seen) + 600 ORDER BY ts",
-        (since,),
+        "SELECT name, ip, mac, vid FROM first_seen WHERE ts > ? AND ts > (SELECT MIN(ts) FROM first_seen) + ? ORDER BY ts",
+        (since, NEW_DEVICE_GRACE_SECONDS),
     ).fetchall()
     if new_devices:
         parts.append("**New devices seen**")
-        parts += [f"• {name or '?'} — `{ip}` `{mac}` ({vlan_label(thresholds, vid)})" for name, ip, mac, vid in new_devices]
+        parts += [
+            f"• {name or '?'} — `{ip}` `{mac}` ({vlan_label(thresholds, vid)})" + (" — randomized MAC" if is_randomized_mac(mac) else "")
+            for name, ip, mac, vid in new_devices
+        ]
     return "\n".join(parts)
 
 
@@ -598,7 +637,8 @@ def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: i
     clients = client.list_clients()
     record_poll(db, clients, now, max_gap)
     report_threshold_problems(db, config.webhook_url, config.thresholds_path, problems)
-    for message in check_alerts(db, clients, thresholds, now, config.poll_interval):
+    alerts = check_alerts(db, clients, thresholds, now, config.poll_interval) + new_device_alerts(db, clients, thresholds, now)
+    for message in alerts:
         post_discord(config.webhook_url, message)
     if report_due(db, config.report_hour, now):
         # Skip (but still mark as sent) when there's nothing to report yet, e.g.

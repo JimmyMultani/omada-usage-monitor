@@ -22,9 +22,16 @@ ghcr.io/jimmymultani/omada-usage-monitor
   interval). A single spike never alerts.
 - **📈 Daily volume:** a client's rolling 24-hour upload or download passes its
   `daily_gb` limit.
+- **🆕 New device:** a device joins a VLAN marked `alert_new_devices` for the
+  first time. Devices already on the network when the monitor first starts
+  don't count, and a device that leaves and comes back isn't new.
 - **📊 Daily report** (once a day, after `DAILY_REPORT_HOUR` local time): the
   top 10 clients by total traffic, the top uploaders on VLANs marked
   `report_top_uploaders`, and any device first seen in the last 24 hours.
+
+New devices with a randomized MAC address (phones and laptops use these for
+privacy) are flagged as such, since they may be a known device on a new
+private address rather than a new device.
 - **🛑 / ✅ Monitor health:** a post when 6 polls in a row fail (~30 min of
   not seeing traffic), and another when polling recovers.
 - **⚠️ / ✅ Thresholds file problems:** a post listing problems in the
@@ -170,6 +177,7 @@ than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
     "<vlan id>": {
       "label": "IoT",
       "report_top_uploaders": true,
+      "alert_new_devices": true,
       "sustained_mbps": { "up": 10, "down": 100 },
       "daily_gb": { "up": 100, "down": 500 }
     }
@@ -188,6 +196,9 @@ than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
   network). `label` is used in messages.
 - **`report_top_uploaders`** adds a "top uploaders" table for that VLAN to the
   daily report.
+- **`alert_new_devices`** posts as soon as a new device joins that VLAN,
+  instead of waiting for the daily report. Useful for VLANs where new
+  devices should be rare, like IoT.
 - **`sustained_mbps`** is the per-poll rate limit, which must be exceeded for 3
   polls in a row. **`daily_gb`** is the rolling 24-hour total limit. Both take
   separate `up` and `down` values.

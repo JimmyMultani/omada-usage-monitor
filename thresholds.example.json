@@ -7,6 +7,7 @@
     "20": {
       "label": "IoT",
       "report_top_uploaders": true,
+      "alert_new_devices": true,
       "sustained_mbps": { "up": 10, "down": 100 },
       "daily_gb": { "up": 100, "down": 500 }
     }
