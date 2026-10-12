@@ -85,6 +85,11 @@ class LoadThresholdsTest(unittest.TestCase):
         self.assertEqual(thresholds, {})
         self.assertTrue(problems[0].startswith("not valid JSON"))
 
+    def test_vlan_flags_must_be_booleans(self):
+        thresholds, problems = self.load({"vlans": {"20": {"alert_new_devices": "yes", "report_top_uploaders": True}}})
+        self.assertEqual(thresholds["vlans"], {"20": {"report_top_uploaders": True}})
+        self.assertEqual(problems, ['vlans["20"].alert_new_devices: must be true or false; ignored'])
+
     def test_client_macs_are_normalized(self):
         thresholds, problems = self.load({"clients": {" aa:bb:cc:dd:ee:0f ": {"daily_gb": {"up": 1}}}})
         self.assertEqual(problems, [])
@@ -165,6 +170,52 @@ class AlertTest(unittest.TestCase):
         self.assertTrue(monitor.claim_alert(self.db, "m", "daily_up", monitor.ALERT_COOLDOWN_SECONDS))
 
 
+class NewDeviceAlertTest(unittest.TestCase):
+    WATCHING = {**THRESHOLDS, "vlans": {**THRESHOLDS["vlans"], "20": {**THRESHOLDS["vlans"]["20"], "alert_new_devices": True}}}
+
+    def setUp(self):
+        self.db = monitor.open_db(":memory:")
+        self.start = 1_000_000
+
+    def poll(self, at, *clients):
+        monitor.record_poll(self.db, list(clients), at, INTERVAL * 2)
+        return monitor.new_device_alerts(self.db, list(clients), self.WATCHING, at)
+
+    def test_new_device_on_watched_vlan_alerts_once(self):
+        known, new = client(), client(mac="00-11-22-33-44-55", name="Mystery Plug")
+        self.assertEqual(self.poll(self.start, known), [])
+        later = self.start + 3600
+        messages = self.poll(later, known, new)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("🆕 New device joined: **Mystery Plug** (IoT", messages[0])
+        self.assertNotIn("randomized", messages[0])
+        self.assertEqual(self.poll(later + INTERVAL, known, new), [])
+
+    def test_devices_seen_during_startup_grace_period_are_not_new(self):
+        self.poll(self.start, client())
+        self.assertEqual(self.poll(self.start + INTERVAL, client(), client(mac="00-11-22-33-44-55")), [])
+
+    def test_unwatched_vlan_does_not_alert(self):
+        self.poll(self.start, client())
+        self.assertEqual(self.poll(self.start + 3600, client(mac="00-11-22-33-44-55", vid=0)), [])
+
+    def test_returning_device_is_not_new(self):
+        self.poll(self.start, client())
+        self.poll(self.start + INTERVAL)
+        self.assertEqual(self.poll(self.start + 3600, client()), [])
+
+    def test_randomized_mac_is_flagged(self):
+        self.poll(self.start, client())
+        messages = self.poll(self.start + 3600, client(mac="DA-11-22-33-44-55", name="iPhone"))
+        self.assertIn("MAC is randomized", messages[0])
+
+    def test_is_randomized_mac(self):
+        self.assertEqual(
+            [monitor.is_randomized_mac(mac) for mac in ("02-00-00-00-00-01", "DA-11-22-33-44-55", "00-11-22-33-44-55", "B8-27-EB-00-00-00")],
+            [True, True, False, False],
+        )
+
+
 class ReportTest(unittest.TestCase):
     def test_report_lists_top_talkers_and_new_devices(self):
         db = monitor.open_db(":memory:")
@@ -219,6 +270,21 @@ class RunOnceTest(unittest.TestCase):
                 monitor.run_once(config, omada, db, 1_000_000 + 3 * INTERVAL)
                 self.assertEqual(post.call_count, 2)
                 self.assertIn("no more problems", post.call_args[0][1])
+
+    def test_new_device_alert_is_posted(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            config = make_config(data_dir, report_hour=24)  # never due
+            with open(config.thresholds_path, "w") as f:
+                json.dump(NewDeviceAlertTest.WATCHING, f)
+            db = monitor.open_db(":memory:")
+            omada = FakeOmada()
+            with mock.patch.object(monitor, "post_discord") as post:
+                omada.clients = [client()]
+                monitor.run_once(config, omada, db, 1_000_000)
+                omada.clients = [client(), client(mac="00-11-22-33-44-55", name="Mystery Plug")]
+                monitor.run_once(config, omada, db, 1_000_000 + 3600)
+                post.assert_called_once()
+                self.assertIn("New device joined: **Mystery Plug**", post.call_args[0][1])
 
     def test_daily_report_skipped_until_there_is_data(self):
         with tempfile.TemporaryDirectory() as data_dir:
