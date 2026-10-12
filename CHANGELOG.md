@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.1.0...v1.2.0) (2026-10-12)
+
+
+### Features
+
+* Alert when a new device joins a watched VLAN ([#17](https://github.com/JimmyMultani/omada-usage-monitor/issues/17)) ([72d1f60](https://github.com/JimmyMultani/omada-usage-monitor/commit/72d1f60ff11eed86ee95e80dc23d973de7204afb))
+
 ## [1.1.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.0.0...v1.1.0) (2026-10-09)
 
 
