@@ -57,7 +57,7 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(limits["sustained_mbps"], {"up": None, "down": 100})
 
     def test_report_only_vlan_has_no_limits(self):
-        self.assertEqual(monitor.limits_for(THRESHOLDS, "11-11-11-11-11-11", 0), {"sustained_mbps": {}, "daily_gb": {}})
+        self.assertEqual(monitor.limits_for(THRESHOLDS, "11-11-11-11-11-11", 0), {kind: {} for kind in monitor.LIMIT_KINDS})
 
 
 class LoadThresholdsTest(unittest.TestCase):
@@ -168,6 +168,98 @@ class AlertTest(unittest.TestCase):
         self.assertTrue(monitor.claim_alert(self.db, "m", "daily_up", 0))
         self.assertFalse(monitor.claim_alert(self.db, "m", "daily_up", monitor.ALERT_COOLDOWN_SECONDS - 1))
         self.assertTrue(monitor.claim_alert(self.db, "m", "daily_up", monitor.ALERT_COOLDOWN_SECONDS))
+
+
+class BaselineAlertTest(unittest.TestCase):
+    """Days are written as one sample each; day 0 is the current 24h window."""
+
+    GB = 10**9
+    THRESHOLDS = {
+        "vlans": {"20": {"label": "IoT", "baseline_multiplier": {"up": 5, "down": 5}}},
+        "clients": {"AA-AA-AA-AA-AA-AA": {"baseline_multiplier": {"up": None}}},
+    }
+
+    def setUp(self):
+        self.db = monitor.open_db(":memory:")
+        self.now = 10_000_000
+
+    def day(self, ago, up_gb=0.0, down_gb=0.0, mac="11-11-11-11-11-11", seconds=monitor.DAY):
+        self.db.execute(
+            "INSERT INTO samples VALUES (?, ?, 'Cam', '10.0.20.5', 20, ?, ?, ?)",
+            (self.now - ago * monitor.DAY - 60, mac, int(up_gb * self.GB), int(down_gb * self.GB), seconds),
+        )
+
+    def history(self, up_gb, days=3, mac="11-11-11-11-11-11"):
+        for ago in range(1, days + 1):
+            self.day(ago, up_gb=up_gb, down_gb=1, mac=mac)
+
+    def check(self, mac="11-11-11-11-11-11", at=None):
+        return monitor.check_alerts(self.db, [client(mac=mac)], self.THRESHOLDS, at or self.now, INTERVAL)
+
+    def test_alerts_when_last_24h_is_far_above_the_usual_day(self):
+        self.history(up_gb=0.5)
+        self.day(0, up_gb=15, down_gb=1)
+        messages = self.check()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("has uploaded 15.0 GB in the last 24h, 30× its usual 0.5 GB/day (limit 5×)", messages[0])
+
+    def test_shows_a_decimal_near_the_limit(self):
+        self.history(up_gb=2)
+        self.day(0, up_gb=10.6, down_gb=1)
+        self.assertIn("5.3× its usual 2.0 GB/day", self.check()[0])
+
+    def test_within_multiplier_does_not_alert(self):
+        self.history(up_gb=2)
+        self.day(0, up_gb=9, down_gb=1)
+        self.assertEqual(self.check(), [])
+
+    def test_needs_minimum_full_days_of_history(self):
+        self.history(up_gb=0.5, days=2)
+        self.day(0, up_gb=15)
+        self.assertEqual(self.check(), [])
+
+    def test_small_days_never_alert(self):
+        self.history(up_gb=0.01)
+        self.day(0, up_gb=0.9)
+        self.assertEqual(self.check(), [])
+
+    def test_partially_measured_days_are_left_out_of_the_average(self):
+        self.history(up_gb=2)
+        self.day(4, up_gb=0.01, seconds=monitor.DAY // 4)
+        self.day(5, up_gb=0.01, seconds=monitor.DAY // 4)
+        self.day(0, up_gb=9, down_gb=1)
+        self.assertEqual(self.check(), [])  # 4.5× the full days; partial days would make it 7.5×
+
+    def test_days_beyond_the_window_are_left_out(self):
+        self.history(up_gb=0.5)
+        for ago in range(8, 12):
+            self.day(ago, up_gb=10)
+        self.day(0, up_gb=15)
+        self.assertEqual(len(self.check()), 1)
+
+    def test_repeats_at_most_daily(self):
+        self.history(up_gb=0.5)
+        self.day(0, up_gb=15)
+        self.assertEqual(len(self.check()), 1)
+        self.assertEqual(self.check(at=self.now + 7 * 3600), [])  # same 15 GB day, still in the last 24h
+        # A day later the 15 GB day is part of the baseline (now 4.1 GB/day), so
+        # it takes a bigger day to alert again.
+        self.now += monitor.DAY + 60
+        self.day(0, up_gb=40)
+        self.assertEqual(len(self.check()), 1)
+
+    def test_client_override_turns_it_off_per_direction(self):
+        mac = "AA-AA-AA-AA-AA-AA"
+        self.history(up_gb=0.5, mac=mac)
+        self.day(0, up_gb=15, down_gb=20, mac=mac)
+        messages = self.check(mac=mac)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("has downloaded 20.0 GB", messages[0])
+
+    def test_idle_device_that_wakes_up(self):
+        self.history(up_gb=0)
+        self.day(0, up_gb=3)
+        self.assertIn("far above its usual 0.0 GB/day", self.check()[0])
 
 
 class NewDeviceAlertTest(unittest.TestCase):

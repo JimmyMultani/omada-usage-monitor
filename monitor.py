@@ -38,8 +38,20 @@ DISCORD_LIMIT = 2000
 # Devices first seen this soon after the monitor's very first poll were
 # already on the network, so they're never treated as new.
 NEW_DEVICE_GRACE_SECONDS = 600
+# Baseline alerts compare a client's last 24h with its average day over the
+# previous week. Days measured less than BASELINE_FULL_DAY_FRACTION of the
+# time (first day, offline stretches) are left out of the average, and
+# there's no baseline until BASELINE_MIN_DAYS full days exist. Days under
+# BASELINE_MIN_GB never alert, however big the jump. Defaults were picked
+# from a week of real home-network data: normal days stayed under 5× average.
+BASELINE_DAYS = 7
+BASELINE_MIN_DAYS = 3
+BASELINE_FULL_DAY_FRACTION = 0.9
+BASELINE_MIN_GB = 1
+# A changed baseline stays changed for days, so repeat at most daily.
+BASELINE_COOLDOWN_SECONDS = DAY
 
-LIMIT_KINDS = ("sustained_mbps", "daily_gb")
+LIMIT_KINDS = ("sustained_mbps", "daily_gb", "baseline_multiplier")
 VLAN_FLAGS = ("report_top_uploaders", "alert_new_devices")
 VLAN_KEYS = {"label", *VLAN_FLAGS, *LIMIT_KINDS}
 CLIENT_KEYS = {"note", *LIMIT_KINDS}
@@ -302,13 +314,14 @@ def vlan_label(thresholds: dict, vid: int) -> str:
 def limits_for(thresholds: dict, mac: str, vid: int) -> dict:
     """Effective limits for a client: its VLAN's, with per-MAC overrides on top.
 
-    Shape: {"sustained_mbps": {"up": x, "down": y}, "daily_gb": {...}}, where
-    a missing or null value means "don't alert on this".
+    Shape: {"sustained_mbps": {"up": x, "down": y}, "daily_gb": {...}, ...}
+    (one entry per LIMIT_KINDS), where a missing or null value means "don't
+    alert on this".
     """
     vlan = thresholds.get("vlans", {}).get(str(vid), {})
     client = thresholds.get("clients", {}).get(mac, {})
     limits = {}
-    for kind in ("sustained_mbps", "daily_gb"):
+    for kind in LIMIT_KINDS:
         limits[kind] = {**vlan.get(kind, {}), **client.get(kind, {})}
     return limits
 
@@ -336,6 +349,24 @@ def daily_totals(db: sqlite3.Connection, mac: str, now: int) -> tuple[int, int]:
         (mac, now - DAY),
     ).fetchone()
     return row[0], row[1]
+
+
+def baseline_daily(db: sqlite3.Connection, mac: str, now: int) -> Optional[tuple[float, float]]:
+    """A client's average (up, down) bytes per day over the BASELINE_DAYS
+    24h windows before the current one, counting only well-measured windows.
+    None until there are BASELINE_MIN_DAYS of them."""
+    rows = db.execute(
+        """
+        SELECT (? - ts) / ? AS day, SUM(up_bytes), SUM(down_bytes), SUM(seconds)
+        FROM samples WHERE mac = ? AND ts <= ? AND ts > ?
+        GROUP BY day
+        """,
+        (now, DAY, mac, now - DAY, now - (BASELINE_DAYS + 1) * DAY),
+    ).fetchall()
+    full = [(up, down) for _, up, down, seconds in rows if seconds >= BASELINE_FULL_DAY_FRACTION * DAY]
+    if len(full) < BASELINE_MIN_DAYS:
+        return None
+    return sum(up for up, _ in full) / len(full), sum(down for _, down in full) / len(full)
 
 
 # --- Discord ----------------------------------------------------------------
@@ -428,6 +459,27 @@ def check_alerts(db: sqlite3.Connection, clients: list[dict], thresholds: dict, 
                     f"📈 {describe(client, thresholds)} has {'uploaded' if direction == 'up' else 'downloaded'} "
                     f"{gb(totals[direction]):.1f} GB in the last 24h (limit {limit} GB).\n{footer}"
                 )
+
+        if any(limits["baseline_multiplier"].get(direction) is not None for direction in ("up", "down")):
+            baseline = baseline_daily(db, mac, now)
+            for d, direction in enumerate(("up", "down")):
+                multiplier = limits["baseline_multiplier"].get(direction)
+                if multiplier is None or baseline is None:
+                    continue
+                usual, today = baseline[d], totals[direction]
+                if (
+                    gb(today) > BASELINE_MIN_GB
+                    and today > multiplier * usual
+                    and claim_alert(db, mac, f"baseline_{direction}", now, BASELINE_COOLDOWN_SECONDS)
+                ):
+                    ratio = today / usual if usual else None
+                    # One decimal near the limit, so 5.3× doesn't read as "5× (limit 5×)".
+                    times = "far above" if ratio is None else f"{ratio:.1f}×" if ratio < 10 else f"{ratio:.0f}×"
+                    messages.append(
+                        f"🔺 {describe(client, thresholds)} has {'uploaded' if direction == 'up' else 'downloaded'} "
+                        f"{gb(today):.1f} GB in the last 24h, {times} its usual {gb(usual):.1f} GB/day "
+                        f"(limit {multiplier}×).\n{footer}"
+                    )
     return messages
 
 
@@ -459,10 +511,10 @@ def is_randomized_mac(mac: str) -> bool:
     return mac[1:2].upper() in ("2", "6", "A", "E")
 
 
-def claim_alert(db: sqlite3.Connection, mac: str, kind: str, now: int) -> bool:
+def claim_alert(db: sqlite3.Connection, mac: str, kind: str, now: int, cooldown: int = ALERT_COOLDOWN_SECONDS) -> bool:
     """True (and records the alert) unless the same alert fired within the cooldown."""
     row = db.execute("SELECT ts FROM alerts WHERE mac = ? AND kind = ?", (mac, kind)).fetchone()
-    if row and now - row[0] < ALERT_COOLDOWN_SECONDS:
+    if row and now - row[0] < cooldown:
         return False
     db.execute("INSERT OR REPLACE INTO alerts VALUES (?, ?, ?)", (mac, kind, now))
     return True

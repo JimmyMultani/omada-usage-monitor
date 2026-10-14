@@ -8,6 +8,7 @@
       "label": "IoT",
       "report_top_uploaders": true,
       "alert_new_devices": true,
+      "baseline_multiplier": { "up": 5, "down": 5 },
       "sustained_mbps": { "up": 10, "down": 100 },
       "daily_gb": { "up": 100, "down": 500 }
     }
