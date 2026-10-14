@@ -22,6 +22,11 @@ ghcr.io/jimmymultani/omada-usage-monitor
   interval). A single spike never alerts.
 - **📈 Daily volume:** a client's rolling 24-hour upload or download passes its
   `daily_gb` limit.
+- **🔺 Unusual volume:** a client's rolling 24-hour upload or download is more
+  than `baseline_multiplier` times its usual day (see
+  [Baseline alerts](#baseline-alerts)). Catches a device whose behavior
+  changes even when it stays under fixed limits. At most once a day per
+  client and direction.
 - **🆕 New device:** a device joins a VLAN marked `alert_new_devices` for the
   first time. Devices already on the network when the monitor first starts
   don't count, and a device that leaves and comes back isn't new.
@@ -178,6 +183,7 @@ than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
       "label": "IoT",
       "report_top_uploaders": true,
       "alert_new_devices": true,
+      "baseline_multiplier": { "up": 5, "down": 5 },
       "sustained_mbps": { "up": 10, "down": 100 },
       "daily_gb": { "up": 100, "down": 500 }
     }
@@ -200,8 +206,9 @@ than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
   instead of waiting for the daily report. Useful for VLANs where new
   devices should be rare, like IoT.
 - **`sustained_mbps`** is the per-poll rate limit, which must be exceeded for 3
-  polls in a row. **`daily_gb`** is the rolling 24-hour total limit. Both take
-  separate `up` and `down` values.
+  polls in a row. **`daily_gb`** is the rolling 24-hour total limit.
+  **`baseline_multiplier`** alerts when the last 24 hours exceed that multiple
+  of the client's usual day. All three take separate `up` and `down` values.
 - **`clients`** is keyed by MAC address. Lowercase and colons are fine; they're
   normalized to Omada's `AA-BB-CC-DD-EE-FF`. A client's keys override its
   VLAN's limits per direction. Anything not overridden is inherited.
@@ -218,6 +225,26 @@ report-only until it's fixed.
 
 Start with loose limits that only catch obvious runaways, then tighten them
 once a week of daily reports shows real baselines.
+
+### Baseline alerts
+
+`baseline_multiplier` compares each client with itself instead of a fixed
+number, so one setting suits a camera that uploads 0.5 GB a day and one that
+uploads 50 GB. A client's **usual day** is its average 24 hours over the
+previous week. The alert fires when the last 24 hours exceed
+`baseline_multiplier` × the usual day, but only if:
+
+- there are at least 3 days of history. Days the client was measured less
+  than 90% of the time (its first day, long offline stretches) don't count
+  toward the average, so new devices stay quiet for their first few days.
+- the last 24 hours are over 1 GB, so a device going from 10 MB to 100 MB
+  doesn't alert.
+
+`5` is a good starting point. On a week of real home-network data, devices'
+busiest normal days stayed under 5× their average, and the alerts at 5× were
+a real change in a camera's behavior plus work laptops coming back after a
+long weekend. That's why this suits VLANs with steady devices, like IoT, more
+than ones with weekly patterns, like work machines.
 
 ## Prometheus metrics
 
