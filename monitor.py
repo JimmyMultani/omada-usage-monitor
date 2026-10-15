@@ -83,7 +83,6 @@ class Config:
             return value
 
         data_dir = os.environ.get("DATA_DIR", "/data")
-        here = os.path.dirname(os.path.abspath(__file__))
         return cls(
             base_url=required("OMADA_BASE_URL").rstrip("/"),
             client_id=required("OMADA_CLIENT_ID"),
@@ -94,11 +93,16 @@ class Config:
             webhook_url=os.environ.get("DISCORD_WEBHOOK_URL") or None,
             db_path=os.path.join(data_dir, "usage.sqlite3"),
             heartbeat_path=os.path.join(data_dir, "heartbeat"),
-            thresholds_path=os.environ.get("THRESHOLDS_PATH", os.path.join(here, "thresholds.json")),
+            thresholds_path=default_thresholds_path(),
             poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "300")),
             report_hour=int(os.environ.get("DAILY_REPORT_HOUR", "8")),
             metrics_port=int(os.environ["METRICS_PORT"]) if os.environ.get("METRICS_PORT") else None,
         )
+
+
+def default_thresholds_path() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.environ.get("THRESHOLDS_PATH", os.path.join(here, "thresholds.json"))
 
 
 # --- Omada Open API ---------------------------------------------------------
@@ -705,11 +709,32 @@ def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: i
     return clients
 
 
+def check_thresholds(path: str) -> int:
+    """Print what a thresholds file configures, or its problems. Every problem
+    means part of the file is being ignored, so any problem fails the check.
+    Returns the exit code."""
+    thresholds, problems = load_thresholds(path)
+    if problems:
+        for problem in problems:
+            print(f"{path}: {problem}")
+        return 1
+    print(f"{path}: OK ({len(thresholds['vlans'])} VLANs, {len(thresholds['clients'])} client overrides)")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--version", action="version", version=f"omada-usage-monitor {__version__}")
     parser.add_argument("--once", action="store_true", help="poll once and exit")
     parser.add_argument("--report-now", action="store_true", help="print/post the daily report from stored data and exit")
+    parser.add_argument(
+        "--check-thresholds", nargs="?", const="", metavar="PATH",
+        help="check a thresholds file (default: $THRESHOLDS_PATH) and exit; non-zero if it has problems",
+    )
     args = parser.parse_args()
+
+    if args.check_thresholds is not None:
+        sys.exit(check_thresholds(args.check_thresholds or default_thresholds_path()))
 
     config = Config.from_env()
     db = open_db(config.db_path)
@@ -721,6 +746,7 @@ def main() -> None:
         post_discord(config.webhook_url, build_report(db, thresholds, int(time.time())))
         return
 
+    print(f"omada-usage-monitor {__version__} starting", flush=True)
     client = OmadaClient(config)
     metrics = Metrics()
     if config.metrics_port is not None and not args.once:

@@ -291,9 +291,11 @@ addresses, so only publish it on a trusted network.
 ## CLI
 
 ```sh
-python3 monitor.py              # poll forever
-python3 monitor.py --once       # poll once and exit (errors are raised, not retried)
-python3 monitor.py --report-now # post/print the daily report from stored data and exit
+python3 monitor.py                         # poll forever
+python3 monitor.py --once                  # poll once and exit (errors are raised, not retried)
+python3 monitor.py --report-now            # post/print the daily report from stored data and exit
+python3 monitor.py --check-thresholds [F]  # check a thresholds file and exit (default: $THRESHOLDS_PATH)
+python3 monitor.py --version
 ```
 
 In the container:
@@ -301,6 +303,19 @@ In the container:
 ```sh
 docker compose run --rm omada-usage-monitor --report-now
 ```
+
+`--check-thresholds` needs no controller or webhook settings. It prints
+`OK` with a summary, or each problem (the same ones the monitor would post to
+Discord), and exits non-zero if there are any. Every problem means part of the
+file is being ignored. That makes it a pre-deploy check, e.g. in the CI of
+the repo that holds your thresholds file:
+
+```sh
+docker run --rm -v "$PWD/thresholds.json:/config/thresholds.json:ro" \
+  ghcr.io/jimmymultani/omada-usage-monitor:1 --check-thresholds
+```
+
+The version is also logged at startup (`omada-usage-monitor 1.3.0 starting`).
 
 ## Troubleshooting
 
