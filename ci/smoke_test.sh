@@ -105,6 +105,18 @@ user=$(user_of "$name")
 [ "$user" = 10001:10001 ] || fail "expected to run as 10001:10001, got $user"
 if logs_contain "$name" "poll failed"; then fail "a poll failed"; fi
 if logs_contain "$name" "Problems in the thresholds file"; then fail "thresholds.example.json has problems"; fi
+logs_contain "$name" "^omada-usage-monitor [0-9.]* starting" || fail "no version line at startup"
+echo "ok: version logged at startup"
+
+# --check-thresholds in a throwaway container, with no Omada settings at all.
+if ! check_output=$(docker run --rm -v "$root/thresholds.example.json:/config/thresholds.json:ro" "$image" --check-thresholds 2>&1); then
+  fail "--check-thresholds rejected thresholds.example.json: $check_output"
+fi
+echo "ok: --check-thresholds accepts thresholds.example.json"
+if check_output=$(docker run --rm "$image" --check-thresholds 2>&1); then
+  fail "--check-thresholds passed with no thresholds file: $check_output"
+fi
+echo "ok: --check-thresholds fails without a thresholds file"
 
 # The user: override container, started alongside the first, has had time to poll.
 wait_for "a successful poll as $other_user" logs_contain "$other_name" "polled 2 clients"

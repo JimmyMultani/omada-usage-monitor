@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -456,6 +458,51 @@ class SplitMessageTest(unittest.TestCase):
         for chunk in chunks:
             self.assertLessEqual(len(chunk), monitor.DISCORD_LIMIT)
             self.assertEqual(chunk.count("```") % 2, 0)
+
+
+class CliTest(unittest.TestCase):
+    """Runs main() with no Omada settings in the environment, as a deployment
+    repo's CI would."""
+
+    def run_main(self, *args, env=None):
+        output = io.StringIO()
+        with mock.patch("sys.argv", ["monitor.py", *args]), mock.patch.dict(os.environ, env or {}, clear=True), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exit:
+            monitor.main()
+        return exit.exception.code, output.getvalue()
+
+    def write(self, content):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = os.path.join(directory.name, "thresholds.json")
+        with open(path, "w") as f:
+            json.dump(content, f)
+        return path
+
+    def test_check_thresholds_passes_a_good_file(self):
+        code, output = self.run_main("--check-thresholds", self.write(THRESHOLDS))
+        self.assertEqual(code, 0)
+        self.assertIn(": OK (2 VLANs, 1 client overrides)", output)
+
+    def test_check_thresholds_fails_on_any_problem(self):
+        code, output = self.run_main("--check-thresholds", self.write({"vlans": {"20": {"sustained_mpbs": {}}}}))
+        self.assertEqual(code, 1)
+        self.assertIn('vlans["20"]: unknown key "sustained_mpbs"; ignored', output)
+
+    def test_check_thresholds_fails_on_a_missing_file(self):
+        code, output = self.run_main("--check-thresholds", "/nonexistent/thresholds.json")
+        self.assertEqual(code, 1)
+        self.assertIn("file not found", output)
+
+    def test_check_thresholds_defaults_to_thresholds_path(self):
+        code, output = self.run_main("--check-thresholds", env={"THRESHOLDS_PATH": self.write(THRESHOLDS)})
+        self.assertEqual(code, 0)
+        self.assertIn(": OK", output)
+
+    def test_version(self):
+        code, output = self.run_main("--version")
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), f"omada-usage-monitor {monitor.__version__}")
 
 
 if __name__ == "__main__":
