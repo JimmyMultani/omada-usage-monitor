@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.2.0...v1.3.0) (2026-10-15)
+
+
+### Features
+
+* Add --check-thresholds and --version, and log the version at startup ([#22](https://github.com/JimmyMultani/omada-usage-monitor/issues/22)) ([3ec6342](https://github.com/JimmyMultani/omada-usage-monitor/commit/3ec6342f31de42650d93c8bc502f10278ac89589))
+* Alert when a client's daily usage is far above its usual day ([#19](https://github.com/JimmyMultani/omada-usage-monitor/issues/19)) ([308b526](https://github.com/JimmyMultani/omada-usage-monitor/commit/308b526d6e6e9baee3f9428d9ba3815b52da687f))
+
 ## [1.2.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.1.0...v1.2.0) (2026-10-12)
 
 
