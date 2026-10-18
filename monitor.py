@@ -19,6 +19,7 @@ import ssl
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -35,6 +36,12 @@ SUSTAINED_POLLS = 3
 # controller" alert, so a silent monitor isn't mistaken for a quiet network.
 FAILURE_ALERT_POLLS = 6
 DISCORD_LIMIT = 2000
+# On a 429, wait as long as Discord asks, up to this long, this many times.
+DISCORD_MAX_RETRY_WAIT_SECONDS = 60
+DISCORD_RATE_LIMIT_RETRIES = 3
+# Undelivered messages wait in the outbox for the next poll. Past this many,
+# the oldest are dropped, so a long Discord outage doesn't end in a flood.
+MAX_QUEUED_MESSAGES = 100
 # Devices first seen this soon after the monitor's very first poll were
 # already on the network, so they're never treated as new.
 NEW_DEVICE_GRACE_SECONDS = 600
@@ -174,6 +181,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     mac TEXT, kind TEXT, ts INTEGER, PRIMARY KEY (mac, kind)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT);
 """
 
 
@@ -307,7 +315,7 @@ def report_threshold_problems(db: sqlite3.Connection, webhook_url: Optional[str]
         message = f"✅ The thresholds file `{path}` has no more problems."
     if webhook_url:  # In dry-run mode post_discord already prints it.
         print(message, file=sys.stderr, flush=True)
-    post_discord(webhook_url, message)
+    queue_message(db, message)
     set_meta(db, "threshold_problems", current)
 
 
@@ -381,14 +389,73 @@ def post_discord(webhook_url: Optional[str], content: str) -> None:
         print(f"[discord dry-run]\n{content}", flush=True)
         return
     for chunk in split_message(content):
-        request = urllib.request.Request(
-            webhook_url,
-            data=json.dumps({"content": chunk}).encode(),
-            # Discord's edge rejects urllib's default User-Agent.
-            headers={"Content-Type": "application/json", "User-Agent": f"omada-usage-monitor/{__version__}"},
-            method="POST",
-        )
-        urllib.request.urlopen(request, timeout=30).close()
+        post_chunk(webhook_url, chunk)
+
+
+def post_chunk(webhook_url: str, chunk: str) -> None:
+    """Post one message, waiting out Discord's rate limit (HTTP 429) if it
+    asks for a reasonable wait."""
+    request = urllib.request.Request(
+        webhook_url,
+        data=json.dumps({"content": chunk}).encode(),
+        # Discord's edge rejects urllib's default User-Agent.
+        headers={"Content-Type": "application/json", "User-Agent": f"omada-usage-monitor/{__version__}"},
+        method="POST",
+    )
+    for attempt in range(DISCORD_RATE_LIMIT_RETRIES + 1):
+        try:
+            urllib.request.urlopen(request, timeout=30).close()
+            return
+        except urllib.error.HTTPError as error:
+            wait = retry_after(error) if error.code == 429 else None
+            if wait is None or wait > DISCORD_MAX_RETRY_WAIT_SECONDS or attempt == DISCORD_RATE_LIMIT_RETRIES:
+                raise
+            time.sleep(wait)
+
+
+def retry_after(error: urllib.error.HTTPError) -> Optional[float]:
+    """Seconds Discord asks us to wait: `retry_after` in the JSON body, else
+    the Retry-After header."""
+    try:
+        return float(json.loads(error.read())["retry_after"])
+    except (ValueError, KeyError, TypeError):
+        header = error.headers.get("Retry-After") if error.headers else None
+        try:
+            return float(header) if header else None
+        except ValueError:
+            return None
+
+
+def queue_message(db: sqlite3.Connection, content: str) -> None:
+    """Queue a message for Discord inside the caller's transaction, so it's
+    sent only if the poll that produced it commits. Chunks are queued
+    separately, so a failure partway through a long message resends only
+    the rest of it."""
+    for chunk in split_message(content):
+        db.execute("INSERT INTO outbox (content) VALUES (?)", (chunk,))
+    excess = queued_count(db) - MAX_QUEUED_MESSAGES
+    if excess > 0:
+        db.execute("DELETE FROM outbox WHERE id IN (SELECT id FROM outbox ORDER BY id LIMIT ?)", (excess,))
+        print(f"discord outbox full: dropped the {excess} oldest queued messages", file=sys.stderr, flush=True)
+
+
+def deliver_queued(db: sqlite3.Connection, webhook_url: Optional[str]) -> None:
+    """Post queued messages oldest-first, committing after each one, so a
+    failure never resends what already went out. Stops at the first failure;
+    the rest wait for the next call. Never raises for Discord errors, so a
+    Discord outage doesn't count as a failed poll."""
+    for message_id, content in db.execute("SELECT id, content FROM outbox ORDER BY id").fetchall():
+        try:
+            post_discord(webhook_url, content)
+        except Exception as error:
+            print(f"discord post failed ({queued_count(db)} messages queued): {error}", file=sys.stderr, flush=True)
+            return
+        db.execute("DELETE FROM outbox WHERE id = ?", (message_id,))
+        db.commit()
+
+
+def queued_count(db: sqlite3.Connection) -> int:
+    return db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
 
 
 def split_message(content: str) -> list[str]:
@@ -597,6 +664,11 @@ class Metrics:
         self.polls = {"success": 0, "failure": 0}
         self.consecutive_failures = 0
         self.last_success: Optional[int] = None
+        self.queued = 0
+
+    def record_queued(self, count: int) -> None:
+        with self.lock:
+            self.queued = count
 
     def record_success(self, clients: list[dict], now: int) -> None:
         with self.lock:
@@ -617,7 +689,7 @@ class Metrics:
     def render(self) -> str:
         with self.lock:
             clients, client_count, polls = list(self.clients), self.client_count, dict(self.polls)
-            consecutive_failures, last_success = self.consecutive_failures, self.last_success
+            consecutive_failures, last_success, queued = self.consecutive_failures, self.last_success, self.queued
 
         lines = []
 
@@ -643,6 +715,10 @@ class Metrics:
                 [({}, last_success)],
             )
         metric("omada_usage_monitor_clients", "gauge", "Clients seen in the last successful poll.", [({}, client_count)])
+        metric(
+            "omada_usage_monitor_queued_messages", "gauge", "Discord messages waiting to be delivered.",
+            [({}, queued)],
+        )
 
         def client_labels(client: dict) -> dict:
             return {"mac": client["mac"], "name": client.get("name") or "", "vlan": client.get("vid") or 0}
@@ -695,18 +771,26 @@ def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: i
     report_threshold_problems(db, config.webhook_url, config.thresholds_path, problems)
     alerts = check_alerts(db, clients, thresholds, now, config.poll_interval) + new_device_alerts(db, clients, thresholds, now)
     for message in alerts:
-        post_discord(config.webhook_url, message)
+        queue_message(db, message)
     if report_due(db, config.report_hour, now):
         # Skip (but still mark as sent) when there's nothing to report yet, e.g.
         # the first poll after a fresh start past the report hour.
         if db.execute("SELECT 1 FROM samples WHERE ts > ? LIMIT 1", (now - DAY,)).fetchone():
-            post_discord(config.webhook_url, build_report(db, thresholds, now))
+            queue_message(db, build_report(db, thresholds, now))
         set_meta(db, "last_report_date", time.strftime("%Y-%m-%d", time.localtime(now)))
     db.commit()
     with open(config.heartbeat_path, "w") as f:
         f.write(str(now))
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} polled {len(clients)} clients", flush=True)
+    deliver_queued(db, config.webhook_url)
     return clients
+
+
+def send_now(db: sqlite3.Connection, webhook_url: Optional[str], message: str) -> None:
+    """Queue and deliver a message outside a poll, e.g. monitor health."""
+    queue_message(db, message)
+    db.commit()
+    deliver_queued(db, webhook_url)
 
 
 def check_thresholds(path: str) -> int:
@@ -758,7 +842,7 @@ def main() -> None:
             now = int(time.time())
             metrics.record_success(run_once(config, client, db, now), now)
             if failures >= FAILURE_ALERT_POLLS:
-                post_discord(config.webhook_url, "✅ Usage monitor is reaching the Omada controller again.")
+                send_now(db, config.webhook_url, "✅ Usage monitor is reaching the Omada controller again.")
             failures = 0
         except Exception as error:  # Keep polling through transient controller/network failures.
             if args.once:
@@ -769,12 +853,13 @@ def main() -> None:
             print(f"poll failed ({failures} in a row): {error}", file=sys.stderr, flush=True)
             if failures == FAILURE_ALERT_POLLS:
                 try:
-                    post_discord(
-                        config.webhook_url,
+                    send_now(
+                        db, config.webhook_url,
                         f"🛑 Usage monitor has failed {failures} polls in a row and isn't seeing traffic. Last error: `{error}`",
                     )
-                except Exception as post_error:
-                    print(f"failed to post failure alert: {post_error}", file=sys.stderr, flush=True)
+                except Exception as queue_error:
+                    print(f"failed to queue failure alert: {queue_error}", file=sys.stderr, flush=True)
+        metrics.record_queued(queued_count(db))
         if args.once:
             return
         time.sleep(config.poll_interval)
