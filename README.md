@@ -326,7 +326,8 @@ successful poll logs `polled N clients`; each failure logs
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Exits at startup with `sqlite3.OperationalError: unable to open database file` | The bind-mounted data dir isn't writable by the container user (UID 10001, or your `user:` override) | `sudo chown 10001:10001 <data dir>` (or the `user:` override's UID/GID), or grant that user write access, e.g. with Synology ACLs. Needed when moving from a setup that ran as root |
-| `⚠️ Problems in the thresholds file` | The file is missing, isn't valid JSON, or has entries the monitor can't use. The message lists each one | Fix the listed entries, or mount the file at `/config/thresholds.json` (or set `THRESHOLDS_PATH`). A ✅ follows once it's fixed |
+| `⚠️ Problems in the thresholds file` | The file is missing, unreadable, isn't valid JSON, or has entries the monitor can't use. The message lists each one | Fix the listed entries, or mount the file at `/config/thresholds.json` (or set `THRESHOLDS_PATH`). A ✅ follows once it's fixed |
+| `⚠️ … is a directory, not a file` | The host file didn't exist when the container started, so Docker created an empty folder in its place | Remove that folder on the host, create the real file, and restart the container |
 | `poll failed ... Omada API error ... on /openapi/authorize/token` | Wrong client ID, secret, or `OMADA_OMADAC_ID` | Re-check the Open API client and the [ID lookup](#1-create-an-omada-open-api-client) |
 | `poll failed ... Omada API error ... on /openapi/v1/.../clients` | Wrong `OMADA_SITE_ID`, or the Open API client has no access to that site | Check the site list from the ID lookup, and the client's site access in the controller |
 | `poll failed ... CERTIFICATE_VERIFY_FAILED` | `OMADA_STRICT_SSL=true` with a self-signed controller cert | Unset `OMADA_STRICT_SSL`, or give the controller a trusted cert |

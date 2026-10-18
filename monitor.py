@@ -235,6 +235,13 @@ def load_thresholds(path: str) -> tuple[dict, list[str]]:
             thresholds = json.load(f)
     except FileNotFoundError:
         return {}, [f"file not found; {report_only}"]
+    except IsADirectoryError:
+        return {}, [
+            "is a directory, not a file. With Docker, this usually means the host file didn't exist "
+            f"when the container started, so Docker created a folder in its place; {report_only}"
+        ]
+    except OSError as error:
+        return {}, [f"can't be read ({error.strerror or error}); {report_only}"]
     except ValueError as error:
         return {}, [f"not valid JSON ({error}); {report_only}"]
     if not isinstance(thresholds, dict):

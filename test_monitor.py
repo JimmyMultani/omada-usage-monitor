@@ -82,6 +82,26 @@ class LoadThresholdsTest(unittest.TestCase):
         self.assertEqual(thresholds, {})
         self.assertEqual(problems, ["file not found; running report-only (no alerts)"])
 
+    def test_directory_means_report_only_with_a_docker_hint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            thresholds, problems = monitor.load_thresholds(directory)
+        self.assertEqual(thresholds, {})
+        self.assertIn("is a directory", problems[0])
+        self.assertIn("Docker created a folder", problems[0])
+        self.assertTrue(problems[0].endswith("running report-only (no alerts)"))
+
+    def test_unreadable_file_means_report_only(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read files regardless of permissions")
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "thresholds.json")
+            with open(path, "w") as f:
+                json.dump(THRESHOLDS, f)
+            os.chmod(path, 0)
+            thresholds, problems = monitor.load_thresholds(path)
+        self.assertEqual(thresholds, {})
+        self.assertEqual(problems, ["can't be read (Permission denied); running report-only (no alerts)"])
+
     def test_invalid_json_means_report_only(self):
         thresholds, problems = self.load('{"vlans": {')
         self.assertEqual(thresholds, {})
