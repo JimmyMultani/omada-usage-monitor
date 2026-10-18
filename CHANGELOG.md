@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.3.0...v1.3.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* Queue Discord messages so a failed post never resends or fails the poll ([#24](https://github.com/JimmyMultani/omada-usage-monitor/issues/24)) ([a91a232](https://github.com/JimmyMultani/omada-usage-monitor/commit/a91a232d0acb9d961eb68e2e01ffb9b402aac1a8))
+* Run report-only when the thresholds file can't be read ([#26](https://github.com/JimmyMultani/omada-usage-monitor/issues/26)) ([7578419](https://github.com/JimmyMultani/omada-usage-monitor/commit/7578419e92fe2c40207efb9e7628914fd87bb220))
+
 ## [1.3.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.2.0...v1.3.0) (2026-10-15)
 
 

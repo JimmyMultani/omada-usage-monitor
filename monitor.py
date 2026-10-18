@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
-__version__ = "1.3.0"  # x-release-please-version
+__version__ = "1.3.1"  # x-release-please-version
 
 DAY = 24 * 60 * 60
 RETENTION_SECONDS = 35 * DAY
