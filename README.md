@@ -44,6 +44,13 @@ private address rather than a new device.
 
 Each (client, alert type) pair posts at most once every 6 hours.
 
+Messages are queued with the poll that produced them, then sent one at a
+time, so each is posted once even if Discord fails partway. If Discord is
+unreachable or rate-limiting, unsent messages wait and retry on the next poll.
+Up to 100 can wait; past that, the oldest are dropped, and a ⚠️ post says
+how many once Discord is back. Discord problems are logged but don't count as
+failed polls.
+
 With no `DISCORD_WEBHOOK_URL` set, it runs in dry-run mode and prints messages
 to stdout instead.
 
@@ -260,6 +267,7 @@ if Prometheus runs outside the container's network.
 | `omada_usage_monitor_consecutive_poll_failures` | gauge | |
 | `omada_usage_monitor_last_success_timestamp_seconds` | gauge | |
 | `omada_usage_monitor_clients` | gauge | |
+| `omada_usage_monitor_queued_messages` | gauge | |
 | `omada_usage_monitor_info` | gauge | `version` |
 
 The client metrics are Omada's own per-client counters from the latest
@@ -331,7 +339,8 @@ successful poll logs `polled N clients`; each failure logs
 | `poll failed ... Omada API error ... on /openapi/authorize/token` | Wrong client ID, secret, or `OMADA_OMADAC_ID` | Re-check the Open API client and the [ID lookup](#1-create-an-omada-open-api-client) |
 | `poll failed ... Omada API error ... on /openapi/v1/.../clients` | Wrong `OMADA_SITE_ID`, or the Open API client has no access to that site | Check the site list from the ID lookup, and the client's site access in the controller |
 | `poll failed ... CERTIFICATE_VERIFY_FAILED` | `OMADA_STRICT_SSL=true` with a self-signed controller cert | Unset `OMADA_STRICT_SSL`, or give the controller a trusted cert |
-| `poll failed ... HTTP Error 401/403/404` from `discord.com` | Webhook deleted or URL wrong. A failed post fails the whole poll | Create a new webhook and update `DISCORD_WEBHOOK_URL` |
+| `discord post failed (N messages queued): HTTP Error 401/403/404` | Webhook deleted or URL wrong. Polling carries on, and messages wait in the queue (`omada_usage_monitor_queued_messages`) | Create a new webhook and update `DISCORD_WEBHOOK_URL`. Queued messages go out on the next poll |
+| `discord post failed (N messages queued): HTTP Error 429` | Discord kept rate-limiting after the monitor waited out its `retry_after` | Nothing; the queue retries next poll. If it keeps happening, check that nothing else is posting to the same webhook |
 | Container is `unhealthy` | No successful poll in `max(15 min, 3 × POLL_INTERVAL_SECONDS)` | See the `poll failed` lines in the logs |
 | Messages appear in the logs as `[discord dry-run]` instead of in Discord | `DISCORD_WEBHOOK_URL` is unset or empty | Set it |
 | A client never alerts | No limit applies to it: check its VLAN ID in the controller matches a `vlans` key, and any override's MAC matches the client | Fix `thresholds.json`. It's re-read every poll |

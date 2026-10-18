@@ -41,7 +41,9 @@ start_monitor() {
 }
 
 start_monitor "$name"
-start_monitor "$other_name" --user "$other_user" --tmpfs "/data:uid=${other_user%:*},gid=${other_user#*:}"
+# This one also posts to the fake Discord webhook, which rate-limits its first post.
+start_monitor "$other_name" --user "$other_user" --tmpfs "/data:uid=${other_user%:*},gid=${other_user#*:}" \
+  -e DISCORD_WEBHOOK_URL="http://host.docker.internal:$port/webhook"
 
 fail() {
   echo "FAIL: $1"
@@ -123,7 +125,26 @@ wait_for "a successful poll as $other_user" logs_contain "$other_name" "polled 2
 wait_for "a healthy status as $other_user" is_healthy "$other_name"
 user=$(user_of "$other_name")
 [ "$user" = "$other_user" ] || fail "expected to run as $other_user, got $user"
+
+camera_alerts_delivered() {
+  local posts
+  posts=$(curl -s "http://127.0.0.1:$port/webhook/posts")
+  grep -q '"rate_limited": true' <<< "$posts" || return 1
+  grep -o 'Smoke Camera[^"]*has been uploading' <<< "$posts" | wc -l | tr -d ' '
+}
+
+camera_alert_delivered() {
+  [ "$(camera_alerts_delivered)" -ge 1 ]
+}
+
+wait_for "a camera alert delivered to Discord after a 429" camera_alert_delivered
+sleep 11 # two more polls, which must not resend it
+delivered=$(camera_alerts_delivered)
+[ "$delivered" = 1 ] || fail "expected the camera alert delivered once, got $delivered"
+echo "ok: delivered exactly once"
+# The 429 must not have failed a poll either.
 if logs_contain "$other_name" "poll failed"; then fail "a poll failed as $other_user"; fi
+echo "ok: no failed polls as $other_user, despite the 429"
 
 # Last: take the controller away and check failures reach /metrics.
 kill "$fake_pid"

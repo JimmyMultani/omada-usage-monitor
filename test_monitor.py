@@ -439,6 +439,12 @@ class MetricsTest(unittest.TestCase):
         ]:
             self.assertIn(expected, lines)
 
+    def test_queued_messages(self):
+        metrics = monitor.Metrics()
+        self.assertIn("omada_usage_monitor_queued_messages 0", metrics.render().splitlines())
+        metrics.record_queued(4)
+        self.assertIn("omada_usage_monitor_queued_messages 4", metrics.render().splitlines())
+
     def test_failed_poll_drops_client_series_but_keeps_poll_health(self):
         metrics = monitor.Metrics()
         metrics.record_success([client(up=5)], 1_000_000)
@@ -468,6 +474,115 @@ class MetricsTest(unittest.TestCase):
             urllib.request.urlopen(f"{base}/", timeout=5)
         self.assertEqual(error.exception.code, 404)
         error.exception.close()
+
+
+class OutboxTest(unittest.TestCase):
+    def setUp(self):
+        self.db = monitor.open_db(":memory:")
+
+    def queue(self, *messages):
+        for message in messages:
+            monitor.queue_message(self.db, message)
+        self.db.commit()
+
+    def posted(self, post):
+        return [call.args[1].strip() for call in post.call_args_list]
+
+    def test_failure_partway_does_not_resend_what_already_went_out(self):
+        self.queue("one", "two", "three")
+        with mock.patch.object(monitor, "post_discord", side_effect=[None, OSError("429"), None, None]) as post:
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")
+            self.assertEqual(monitor.queued_count(self.db), 2)
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")
+        self.assertEqual(self.posted(post), ["one", "two", "two", "three"])
+        self.assertEqual(monitor.queued_count(self.db), 0)
+
+    def test_poll_succeeds_and_keeps_its_messages_when_discord_is_down(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            config = make_config(data_dir, report_hour=24)  # never due; thresholds file missing → one notice
+            omada = FakeOmada()
+            omada.clients = [client()]
+            with mock.patch.object(monitor, "post_discord", side_effect=OSError("discord down")):
+                monitor.run_once(config, omada, self.db, 1_000_000)
+            self.assertTrue(os.path.exists(config.heartbeat_path))
+            self.assertEqual(monitor.queued_count(self.db), 1)
+
+            with mock.patch.object(monitor, "post_discord") as post:
+                monitor.run_once(config, omada, self.db, 1_000_000 + INTERVAL)
+            post.assert_called_once()
+            self.assertIn("file not found", post.call_args.args[1])
+            self.assertEqual(monitor.queued_count(self.db), 0)
+
+    def test_messages_from_a_rolled_back_poll_are_never_sent(self):
+        monitor.queue_message(self.db, "from a failed poll")
+        self.db.rollback()
+        self.assertEqual(monitor.queued_count(self.db), 0)
+
+    def test_queue_is_capped_dropping_the_oldest(self):
+        with mock.patch.object(monitor, "MAX_QUEUED_MESSAGES", 3):
+            self.queue("1", "2", "3", "4", "5")
+        contents = [row[0].strip() for row in self.db.execute("SELECT content FROM outbox ORDER BY id")]
+        self.assertEqual(contents, ["3", "4", "5"])
+
+    def test_dropped_messages_are_announced_once_before_the_rest(self):
+        with mock.patch.object(monitor, "MAX_QUEUED_MESSAGES", 3):
+            self.queue("1", "2", "3", "4", "5")
+        with mock.patch.object(monitor, "post_discord", side_effect=[OSError("down"), None, None, None, None]) as post:
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")  # notice fails, nothing else tried
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")
+        self.assertEqual(self.posted(post), [
+            "⚠️ 2 older messages were dropped while Discord was unreachable.",
+            "⚠️ 2 older messages were dropped while Discord was unreachable.",
+            "3", "4", "5",
+        ])
+        self.queue("6")
+        with mock.patch.object(monitor, "post_discord") as post:
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")
+        self.assertEqual(self.posted(post), ["6"])
+
+    def test_long_messages_are_queued_as_chunks(self):
+        self.queue("header\n" + "\n".join("x" * 50 for _ in range(100)))
+        self.assertGreater(monitor.queued_count(self.db), 1)
+
+
+class PostChunkTest(unittest.TestCase):
+    URL = "https://discord.example/webhook"
+
+    def rate_limited(self, body=b'{"retry_after": 0.5}', headers=None):
+        return urllib.error.HTTPError(self.URL, 429, "Too Many Requests", headers or {}, io.BytesIO(body))
+
+    def test_waits_out_a_rate_limit_and_retries(self):
+        with mock.patch("urllib.request.urlopen", side_effect=[self.rate_limited(), mock.MagicMock()]) as urlopen, \
+                mock.patch.object(monitor.time, "sleep") as sleep:
+            monitor.post_chunk(self.URL, "hello")
+        sleep.assert_called_once_with(0.5)
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_uses_the_retry_after_header_without_a_json_body(self):
+        error = self.rate_limited(body=b"slow down", headers={"Retry-After": "2"})
+        with mock.patch("urllib.request.urlopen", side_effect=[error, mock.MagicMock()]), \
+                mock.patch.object(monitor.time, "sleep") as sleep:
+            monitor.post_chunk(self.URL, "hello")
+        sleep.assert_called_once_with(2.0)
+
+    def test_gives_up_on_a_long_wait(self):
+        error = self.rate_limited(body=b'{"retry_after": 600}')
+        with mock.patch("urllib.request.urlopen", side_effect=[error]), mock.patch.object(monitor.time, "sleep") as sleep, \
+                self.assertRaises(urllib.error.HTTPError):
+            monitor.post_chunk(self.URL, "hello")
+        sleep.assert_not_called()
+
+    def test_gives_up_after_repeated_rate_limits(self):
+        errors = [self.rate_limited() for _ in range(monitor.DISCORD_RATE_LIMIT_RETRIES + 1)]
+        with mock.patch("urllib.request.urlopen", side_effect=errors), mock.patch.object(monitor.time, "sleep"), \
+                self.assertRaises(urllib.error.HTTPError):
+            monitor.post_chunk(self.URL, "hello")
+
+    def test_other_errors_are_not_retried(self):
+        error = urllib.error.HTTPError(self.URL, 404, "Not Found", {}, io.BytesIO(b"{}"))
+        with mock.patch("urllib.request.urlopen", side_effect=[error]) as urlopen, self.assertRaises(urllib.error.HTTPError):
+            monitor.post_chunk(self.URL, "hello")
+        self.assertEqual(urlopen.call_count, 1)
 
 
 class SplitMessageTest(unittest.TestCase):
