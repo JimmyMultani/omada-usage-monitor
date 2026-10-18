@@ -433,9 +433,13 @@ def queue_message(db: sqlite3.Connection, content: str) -> None:
     the rest of it."""
     for chunk in split_message(content):
         db.execute("INSERT INTO outbox (content) VALUES (?)", (chunk,))
+    # When full, drop the oldest: during a long outage the newest messages
+    # describe the current state (ongoing problems re-alert after their
+    # cooldowns). deliver_queued says how many were dropped.
     excess = queued_count(db) - MAX_QUEUED_MESSAGES
     if excess > 0:
         db.execute("DELETE FROM outbox WHERE id IN (SELECT id FROM outbox ORDER BY id LIMIT ?)", (excess,))
+        set_meta(db, "outbox_dropped", str(int(get_meta(db, "outbox_dropped") or 0) + excess))
         print(f"discord outbox full: dropped the {excess} oldest queued messages", file=sys.stderr, flush=True)
 
 
@@ -444,6 +448,15 @@ def deliver_queued(db: sqlite3.Connection, webhook_url: Optional[str]) -> None:
     failure never resends what already went out. Stops at the first failure;
     the rest wait for the next call. Never raises for Discord errors, so a
     Discord outage doesn't count as a failed poll."""
+    dropped = int(get_meta(db, "outbox_dropped") or 0)
+    if dropped:
+        try:
+            post_discord(webhook_url, f"⚠️ {dropped} older messages were dropped while Discord was unreachable.")
+        except Exception as error:
+            print(f"discord post failed ({queued_count(db)} messages queued): {error}", file=sys.stderr, flush=True)
+            return
+        set_meta(db, "outbox_dropped", "0")
+        db.commit()
     for message_id, content in db.execute("SELECT id, content FROM outbox ORDER BY id").fetchall():
         try:
             post_discord(webhook_url, content)

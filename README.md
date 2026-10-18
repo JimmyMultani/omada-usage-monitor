@@ -46,9 +46,10 @@ Each (client, alert type) pair posts at most once every 6 hours.
 
 Messages are queued with the poll that produced them, then sent one at a
 time, so each is posted once even if Discord fails partway. If Discord is
-unreachable or rate-limiting, unsent messages wait and retry on the next poll
-(up to 100; past that, the oldest are dropped). Discord problems are logged
-but don't count as failed polls.
+unreachable or rate-limiting, unsent messages wait and retry on the next poll.
+Up to 100 can wait; past that, the oldest are dropped, and a ⚠️ post says
+how many once Discord is back. Discord problems are logged but don't count as
+failed polls.
 
 With no `DISCORD_WEBHOOK_URL` set, it runs in dry-run mode and prints messages
 to stdout instead.

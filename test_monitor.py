@@ -504,6 +504,22 @@ class OutboxTest(unittest.TestCase):
         contents = [row[0].strip() for row in self.db.execute("SELECT content FROM outbox ORDER BY id")]
         self.assertEqual(contents, ["3", "4", "5"])
 
+    def test_dropped_messages_are_announced_once_before_the_rest(self):
+        with mock.patch.object(monitor, "MAX_QUEUED_MESSAGES", 3):
+            self.queue("1", "2", "3", "4", "5")
+        with mock.patch.object(monitor, "post_discord", side_effect=[OSError("down"), None, None, None, None]) as post:
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")  # notice fails, nothing else tried
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")
+        self.assertEqual(self.posted(post), [
+            "⚠️ 2 older messages were dropped while Discord was unreachable.",
+            "⚠️ 2 older messages were dropped while Discord was unreachable.",
+            "3", "4", "5",
+        ])
+        self.queue("6")
+        with mock.patch.object(monitor, "post_discord") as post:
+            monitor.deliver_queued(self.db, "https://discord.example/webhook")
+        self.assertEqual(self.posted(post), ["6"])
+
     def test_long_messages_are_queued_as_chunks(self):
         self.queue("header\n" + "\n".join("x" * 50 for _ in range(100)))
         self.assertGreater(monitor.queued_count(self.db), 1)
