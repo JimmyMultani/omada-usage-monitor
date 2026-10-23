@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.3.1...v1.3.2) (2026-10-23)
+
+
+### Bug Fixes
+
+* Round baseline alert ratios up so they never read as the limit ([#30](https://github.com/JimmyMultani/omada-usage-monitor/issues/30)) ([d0952ae](https://github.com/JimmyMultani/omada-usage-monitor/commit/d0952ae48d487523ff570ea96fd0c73d6c91edda))
+
 ## [1.3.1](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.3.0...v1.3.1) (2026-10-18)
 
 
