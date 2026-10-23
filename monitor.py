@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -563,9 +564,7 @@ def check_alerts(db: sqlite3.Connection, clients: list[dict], thresholds: dict, 
                     and today > multiplier * usual
                     and claim_alert(db, mac, f"baseline_{direction}", now, BASELINE_COOLDOWN_SECONDS)
                 ):
-                    ratio = today / usual if usual else None
-                    # One decimal near the limit, so 5.3× doesn't read as "5× (limit 5×)".
-                    times = "far above" if ratio is None else f"{ratio:.1f}×" if ratio < 10 else f"{ratio:.0f}×"
+                    times = "far above" if not usual else format_ratio(today / usual)
                     messages.append(
                         f"🔺 {describe(client, thresholds)} has {'uploaded' if direction == 'up' else 'downloaded'} "
                         f"{gb(today):.1f} GB in the last 24h, {times} its usual {gb(usual):.1f} GB/day "
@@ -600,6 +599,15 @@ def is_randomized_mac(mac: str) -> bool:
     """Phones and laptops use random, "locally administered" MACs for privacy;
     those have the second-lowest bit of the first octet set."""
     return mac[1:2].upper() in ("2", "6", "A", "E")
+
+
+def format_ratio(ratio: float) -> str:
+    """Rounded up, so a ratio just over its limit never reads as the limit
+    ("5.0× (limit 5×)"): to a tenth below 10×, to a whole number above."""
+    # round() first so float noise (2.1 / 0.3 = 7.000000000000001) doesn't round 7.0 up to 7.1.
+    if ratio < 10:
+        return f"{math.ceil(round(ratio * 10, 6)) / 10:.1f}×"
+    return f"{math.ceil(round(ratio, 6))}×"
 
 
 def claim_alert(db: sqlite3.Connection, mac: str, kind: str, now: int, cooldown: int = ALERT_COOLDOWN_SECONDS) -> bool:

@@ -230,6 +230,22 @@ class BaselineAlertTest(unittest.TestCase):
         self.day(0, up_gb=10.6, down_gb=1)
         self.assertIn("5.3× its usual 2.0 GB/day", self.check()[0])
 
+    def test_ratio_just_over_the_limit_never_reads_as_the_limit(self):
+        self.history(up_gb=1.07)
+        self.day(0, up_gb=5.4, down_gb=1)  # 5.05×, which rounds to "5.0×"
+        self.assertIn("5.1× its usual 1.1 GB/day (limit 5×)", self.check()[0])
+
+    def test_format_ratio(self):
+        self.assertEqual(
+            [monitor.format_ratio(r) for r in (5.01, 5.3, 2.1 / 0.3, 9.95, 10.0, 30.2)],
+            ["5.1×", "5.3×", "7.0×", "10.0×", "10×", "31×"],
+        )
+
+    def test_ratio_is_rounded_up_above_ten(self):
+        self.history(up_gb=0.5)
+        self.day(0, up_gb=15.1)  # 30.2×
+        self.assertIn("31× its usual 0.5 GB/day", self.check()[0])
+
     def test_within_multiplier_does_not_alert(self):
         self.history(up_gb=2)
         self.day(0, up_gb=9, down_gb=1)
