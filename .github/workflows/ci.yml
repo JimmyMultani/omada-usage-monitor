@@ -7,6 +7,9 @@ on:
     # Manual tags only; tags created by release-please use GITHUB_TOKEN, which
     # doesn't trigger workflows, so those releases publish from the main run.
     tags: ["v*"]
+  # Manual runs (e.g. after a runner image change) only test: release and
+  # publish are limited to push events.
+  workflow_dispatch:
 
 permissions:
   contents: read
