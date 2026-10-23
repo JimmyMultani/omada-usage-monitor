@@ -41,6 +41,8 @@ private address rather than a new device.
   not seeing traffic), and another when polling recovers.
 - **⚠️ / ✅ Thresholds file problems:** a post listing problems in the
   thresholds file when they first appear, and another once they're fixed.
+- **🌐 WAN IP** (opt-in, see [WAN IP alerts](#wan-ip-alerts)): the gateway's
+  WAN IP changed, or doesn't match the one you expect.
 
 Each (client, alert type) pair posts at most once every 6 hours.
 
@@ -177,6 +179,9 @@ only needs to be readable.
 | `DATA_DIR` | `/data` | SQLite history (35-day retention) and the healthcheck heartbeat |
 | `THRESHOLDS_PATH` | `/config/thresholds.json` | Thresholds file |
 | `METRICS_PORT` | unset | Serve [Prometheus metrics](#prometheus-metrics) at `/metrics` on this port. Unset = no HTTP server |
+| `WAN_IP_ALERTS` | `false` | `true` = post when the gateway's WAN IP changes. See [WAN IP alerts](#wan-ip-alerts) |
+| `EXPECTED_WAN_IP` | unset | Also post (daily) while the WAN IP isn't this. Turns on `WAN_IP_ALERTS` by itself |
+| `WAN_IP_HINT` | unset | Extra line for WAN IP alerts, e.g. what to update |
 
 The image's healthcheck passes while the last successful poll is more recent
 than `max(15 min, 3 × POLL_INTERVAL_SECONDS)`.
@@ -252,6 +257,35 @@ busiest normal days stayed under 5× their average, and the alerts at 5× were
 a real change in a camera's behavior plus work laptops coming back after a
 long weekend. That's why this suits VLANs with steady devices, like IoT, more
 than ones with weekly patterns, like work machines.
+
+## WAN IP alerts
+
+Useful when something allowlists your own WAN IP, like a reverse proxy that
+sees LAN clients arrive from the WAN IP through NAT loopback. If your ISP
+assigns a new address, that setup breaks quietly. With `WAN_IP_ALERTS=true`,
+the monitor reads the gateway's WAN IP each poll and posts when it changes:
+
+> 🌐 The gateway's WAN IP changed: `203.0.113.10` → `198.51.100.20`.
+
+Set `EXPECTED_WAN_IP` to the address your config uses, and it also posts
+while the two differ: at startup, and again daily until they match. A ✅
+follows once they do. Point it at the same variable the rest of your config
+uses, so there's one value to update:
+
+```yaml
+    environment:
+      EXPECTED_WAN_IP: ${MY_ALLOWLISTED_WAN_IP}
+      WAN_IP_HINT: Update MY_ALLOWLISTED_WAN_IP in .env, then recreate the proxy and this container.
+```
+
+Environment variables are read at container start, so after changing the
+value, recreate this container too.
+
+The IP comes from the gateway's WAN port status (`/gateways/{mac}/wan-status`),
+not the device or site "public IP" fields, which some controllers fill with
+the gateway's LAN IP. The last-seen IP is kept in `/data`, so a restart
+neither re-alerts nor misses a change. If the API client can't read the WAN
+status, one ⚠️ post says so and polling carries on.
 
 ## Prometheus metrics
 

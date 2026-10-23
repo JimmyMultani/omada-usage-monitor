@@ -81,6 +81,9 @@ class Config:
     poll_interval: int
     report_hour: int
     metrics_port: Optional[int] = None
+    wan_ip_alerts: bool = False
+    expected_wan_ip: Optional[str] = None
+    wan_ip_hint: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -105,6 +108,10 @@ class Config:
             poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "300")),
             report_hour=int(os.environ.get("DAILY_REPORT_HOUR", "8")),
             metrics_port=int(os.environ["METRICS_PORT"]) if os.environ.get("METRICS_PORT") else None,
+            # Setting an expected IP turns the check on by itself.
+            wan_ip_alerts=os.environ.get("WAN_IP_ALERTS", "false").lower() == "true" or bool(os.environ.get("EXPECTED_WAN_IP")),
+            expected_wan_ip=os.environ.get("EXPECTED_WAN_IP") or None,
+            wan_ip_hint=os.environ.get("WAN_IP_HINT") or None,
         )
 
 
@@ -160,6 +167,25 @@ class OmadaClient:
             if len(clients) >= result.get("totalRows", 0) or not result.get("data"):
                 return clients
             page += 1
+
+    def wan_ips(self) -> list[str]:
+        """The site gateways' current WAN IPv4 addresses, from their WAN port
+        status. Not the device's `publicIp` or the site's `sitePublicIp`: some
+        controllers report the gateway's LAN IP there. Empty when there's no
+        gateway or no WAN port has an address."""
+        token = self._token()
+        base = f"/openapi/v1/{self.config.omadac_id}/sites/{self.config.site_id}"
+        devices = self._request("GET", f"{base}/devices", {"page": 1, "pageSize": 1000}, token=token)
+        ips = set()
+        for device in devices.get("data") or []:
+            if device.get("type") != "gateway":
+                continue
+            ports = self._request("GET", f"{base}/gateways/{device['mac']}/wan-status", {}, token=token)
+            for port in ports if isinstance(ports, list) else []:
+                ip = (port.get("wanPortIpv4Config") or {}).get("ip") or port.get("ip")
+                if ip and ip != "0.0.0.0":
+                    ips.add(ip)
+        return sorted(ips)
 
 
 # --- Storage ----------------------------------------------------------------
@@ -619,6 +645,53 @@ def claim_alert(db: sqlite3.Connection, mac: str, kind: str, now: int, cooldown:
     return True
 
 
+def check_wan_ip(db: sqlite3.Connection, ips: list[str], expected: Optional[str], hint: Optional[str], now: int) -> list[str]:
+    """Posts for the gateway's WAN IPs: when they change from the last poll,
+    and (with `expected`) while it isn't among them, repeating daily as a
+    reminder, plus once more when it matches again. The last-seen IPs are
+    kept in the DB, so a restart neither re-alerts nor misses a change. No
+    IPs (WAN down, gateway offline) changes nothing."""
+    if not ips:
+        return []
+    current = ", ".join(f"`{ip}`" for ip in ips)
+    suffix = f"\n{hint}" if hint else ""
+    messages = []
+    last = get_meta(db, "wan_ips")
+    set_meta(db, "wan_ips", ",".join(ips))
+    changed = last is not None and last != ",".join(ips)
+    if changed:
+        previous = ", ".join(f"`{ip}`" for ip in last.split(","))
+        messages.append(f"🌐 The gateway's WAN IP changed: {previous} → {current}.{suffix}")
+    if expected is None:
+        return messages
+    if expected not in ips:
+        set_meta(db, "wan_ip_mismatch", "1")
+        # A change message already says it; claiming still starts the daily repeat.
+        if claim_alert(db, "gateway", "wan_ip_mismatch", now, DAY) and not changed:
+            messages.append(f"🌐 The gateway's WAN IP is {current}, not the expected `{expected}` (EXPECTED_WAN_IP).{suffix}")
+    elif get_meta(db, "wan_ip_mismatch") == "1":
+        set_meta(db, "wan_ip_mismatch", "0")
+        db.execute("DELETE FROM alerts WHERE mac = 'gateway' AND kind = 'wan_ip_mismatch'")
+        messages.append(f"✅ The gateway's WAN IP matches EXPECTED_WAN_IP (`{expected}`) again.")
+    return messages
+
+
+def wan_ip_alerts(db: sqlite3.Connection, client: OmadaClient, config: Config, now: int) -> list[str]:
+    """check_wan_ip on the gateway's live WAN IPs. A failed read (e.g. the
+    API client isn't allowed to see gateway status) doesn't fail the poll;
+    it's posted once per distinct error."""
+    try:
+        ips = client.wan_ips()
+    except Exception as error:
+        print(f"WAN IP check failed: {error}", file=sys.stderr, flush=True)
+        if get_meta(db, "wan_ip_error") == str(error):
+            return []
+        set_meta(db, "wan_ip_error", str(error))
+        return [f"⚠️ Can't read the gateway's WAN IP, so WAN IP alerts are paused: `{error}`"]
+    set_meta(db, "wan_ip_error", "")
+    return check_wan_ip(db, ips, config.expected_wan_ip, config.wan_ip_hint, now)
+
+
 # --- Daily report -----------------------------------------------------------
 
 
@@ -798,6 +871,8 @@ def run_once(config: Config, client: OmadaClient, db: sqlite3.Connection, now: i
     record_poll(db, clients, now, max_gap)
     report_threshold_problems(db, config.webhook_url, config.thresholds_path, problems)
     alerts = check_alerts(db, clients, thresholds, now, config.poll_interval) + new_device_alerts(db, clients, thresholds, now)
+    if config.wan_ip_alerts:
+        alerts += wan_ip_alerts(db, client, config, now)
     for message in alerts:
         queue_message(db, message)
     if report_due(db, config.report_hour, now):

@@ -40,7 +40,8 @@ start_monitor() {
     "$image" > /dev/null
 }
 
-start_monitor "$name"
+# Expects a different WAN IP than the fake gateway's 203.0.113.10, so it must alert.
+start_monitor "$name" -e EXPECTED_WAN_IP=198.51.100.20 -e WAN_IP_HINT="Update the allowlist."
 # This one also posts to the fake Discord webhook, which rate-limits its first post.
 start_monitor "$other_name" --user "$other_user" --tmpfs "/data:uid=${other_user%:*},gid=${other_user#*:}" \
   -e DISCORD_WEBHOOK_URL="http://host.docker.internal:$port/webhook"
@@ -109,6 +110,11 @@ if logs_contain "$name" "poll failed"; then fail "a poll failed"; fi
 if logs_contain "$name" "Problems in the thresholds file"; then fail "thresholds.example.json has problems"; fi
 logs_contain "$name" "^omada-usage-monitor [0-9.]* starting" || fail "no version line at startup"
 echo "ok: version logged at startup"
+logs_contain "$name" "WAN IP is \`203.0.113.10\`, not the expected \`198.51.100.20\`" || fail "no WAN IP mismatch alert"
+logs_contain "$name" "^Update the allowlist.$" || fail "WAN IP alert has no hint"
+echo "ok: WAN IP mismatch alert, with hint"
+if logs_contain "$other_name" "WAN IP"; then fail "WAN IP alerts ran without being turned on"; fi
+echo "ok: no WAN IP alerts when not turned on"
 
 # --check-thresholds in a throwaway container, with no Omada settings at all.
 if ! check_output=$(docker run --rm -v "$root/thresholds.example.json:/config/thresholds.json:ro" "$image" --check-thresholds 2>&1); then
