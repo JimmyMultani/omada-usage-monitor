@@ -19,7 +19,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - name: Unit tests on Python 3.9 (oldest supported)
@@ -110,7 +110,7 @@ jobs:
   # Runs the built image against a fake Omada API; release and publish wait
   # on it.
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - run: ci/smoke_test.sh
