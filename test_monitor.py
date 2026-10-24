@@ -300,6 +300,97 @@ class BaselineAlertTest(unittest.TestCase):
         self.assertIn("far above its usual 0.0 GB/day", self.check()[0])
 
 
+class WanIpTest(unittest.TestCase):
+    """Uses RFC 5737 documentation addresses."""
+
+    OLD, NEW = "203.0.113.10", "198.51.100.20"
+
+    def setUp(self):
+        self.db = monitor.open_db(":memory:")
+        self.now = 1_000_000
+
+    def check(self, *ips, expected=None, hint=None, after=INTERVAL):
+        self.now += after
+        return monitor.check_wan_ip(self.db, list(ips), expected, hint, self.now)
+
+    def test_first_sighting_is_quiet(self):
+        self.assertEqual(self.check(self.OLD), [])
+
+    def test_change_alerts_once_with_hint(self):
+        self.check(self.OLD)
+        messages = self.check(self.NEW, hint="Update the allowlist.")
+        self.assertEqual(messages, [f"🌐 The gateway's WAN IP changed: `{self.OLD}` → `{self.NEW}`.\nUpdate the allowlist."])
+        self.assertEqual(self.check(self.NEW), [])
+
+    def test_last_ip_survives_a_restart(self):
+        self.check(self.OLD)
+        self.db.commit()
+        restarted = monitor.check_wan_ip(self.db, [self.NEW], None, None, self.now + INTERVAL)
+        self.assertEqual(len(restarted), 1)
+
+    def test_wan_down_changes_nothing(self):
+        self.check(self.OLD)
+        self.assertEqual(self.check(), [])
+        self.assertEqual(self.check(self.OLD), [])
+
+    def test_mismatch_at_startup_alerts_and_repeats_daily(self):
+        first = self.check(self.NEW, expected=self.OLD)
+        self.assertEqual(first, [f"🌐 The gateway's WAN IP is `{self.NEW}`, not the expected `{self.OLD}` (EXPECTED_WAN_IP)."])
+        self.assertEqual(self.check(self.NEW, expected=self.OLD, after=3600), [])
+        self.assertEqual(len(self.check(self.NEW, expected=self.OLD, after=monitor.DAY)), 1)
+
+    def test_change_away_from_expected_posts_one_message(self):
+        self.check(self.OLD, expected=self.OLD)
+        messages = self.check(self.NEW, expected=self.OLD)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("changed", messages[0])
+        self.assertEqual(self.check(self.NEW, expected=self.OLD, after=3600), [])  # daily repeat started
+
+    def test_match_again_is_announced_once(self):
+        self.check(self.NEW, expected=self.OLD)
+        self.assertEqual(self.check(self.NEW, expected=self.NEW), ["✅ The gateway's WAN IP matches EXPECTED_WAN_IP (`198.51.100.20`) again."])
+        self.assertEqual(self.check(self.NEW, expected=self.NEW), [])
+
+    def test_expected_among_several_wans(self):
+        self.assertEqual(self.check(self.NEW, self.OLD, expected=self.OLD), [])
+
+    def test_wan_ips_reads_gateway_wan_status(self):
+        client = monitor.OmadaClient(make_config("/tmp"))
+        responses = {
+            "/devices": {"data": [{"type": "switch", "mac": "AA"}, {"type": "gateway", "mac": "GW"}]},
+            "/gateways/GW/wan-status": [
+                {"name": "WAN1", "ip": self.OLD, "wanPortIpv4Config": {"ip": self.OLD}},
+                {"name": "WAN2", "ip": "0.0.0.0", "wanPortIpv4Config": {"ip": "0.0.0.0"}},
+                {"name": "WAN3", "ip": "", "wanPortIpv4Config": None},
+            ],
+        }
+        with mock.patch.object(client, "_token", return_value="t"), \
+                mock.patch.object(client, "_request", side_effect=lambda method, path, params, token: responses[path.split("/sites/")[1]]):
+            self.assertEqual(client.wan_ips(), [self.OLD])
+
+    def test_read_error_is_posted_once_and_skips_the_check(self):
+        client = mock.Mock()
+        client.wan_ips.side_effect = RuntimeError("Omada API error -1005: permission denied")
+        config = make_config("/tmp")
+        first = monitor.wan_ip_alerts(self.db, client, config, self.now)
+        self.assertEqual(first, ["⚠️ Can't read the gateway's WAN IP, so WAN IP alerts are paused: `Omada API error -1005: permission denied`"])
+        self.assertEqual(monitor.wan_ip_alerts(self.db, client, config, self.now + INTERVAL), [])
+        client.wan_ips.side_effect, client.wan_ips.return_value = None, [self.OLD]
+        self.assertEqual(monitor.wan_ip_alerts(self.db, client, config, self.now + 2 * INTERVAL), [])
+        self.assertEqual(monitor.get_meta(self.db, "wan_ips"), self.OLD)
+
+    def test_config_from_env(self):
+        env = {k: "x" for k in ("OMADA_BASE_URL", "OMADA_CLIENT_ID", "OMADA_CLIENT_SECRET", "OMADA_OMADAC_ID", "OMADA_SITE_ID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertFalse(monitor.Config.from_env().wan_ip_alerts)
+        with mock.patch.dict(os.environ, {**env, "WAN_IP_ALERTS": "true"}, clear=True):
+            self.assertTrue(monitor.Config.from_env().wan_ip_alerts)
+        with mock.patch.dict(os.environ, {**env, "EXPECTED_WAN_IP": self.OLD}, clear=True):
+            config = monitor.Config.from_env()
+            self.assertTrue(config.wan_ip_alerts)
+            self.assertEqual(config.expected_wan_ip, self.OLD)
+
+
 class NewDeviceAlertTest(unittest.TestCase):
     WATCHING = {**THRESHOLDS, "vlans": {**THRESHOLDS["vlans"], "20": {**THRESHOLDS["vlans"]["20"], "alert_new_devices": True}}}
 

@@ -5,7 +5,8 @@ Serves two clients over plain HTTP: an IoT client (VLAN 20) uploading at a
 steady 50 Mbps, enough to trip thresholds.example.json's sustained upload
 limit, and an idle client on the default VLAN.
 
-Also fakes a Discord webhook at /webhook: the first post gets a 429 with
+Also serves a gateway whose WAN1 has the documentation address WAN_IP, for
+WAN IP alerts, and fakes a Discord webhook at /webhook: the first post gets a 429 with
 retry_after, and later ones are recorded. GET /webhook/posts returns them.
 
 Usage: python3 fake_omada.py <port>
@@ -22,6 +23,8 @@ TOKEN = "smoke-test-token"
 UPLOAD_BYTES_PER_SECOND = 50_000_000 // 8
 STARTED = time.time()
 WEBHOOK = {"rate_limited": False, "posts": []}
+GATEWAY_MAC = "02-00-00-00-00-FE"
+WAN_IP = "203.0.113.10"
 
 
 def clients() -> list[dict]:
@@ -62,6 +65,11 @@ class Handler(BaseHTTPRequestHandler):
         elif "/clients?" in self.path:
             data = clients()
             self.reply({"errorCode": 0, "result": {"totalRows": len(data), "data": data}})
+        elif "/devices?" in self.path:
+            data = [{"type": "gateway", "mac": GATEWAY_MAC}, {"type": "switch", "mac": "02-00-00-00-00-FD"}]
+            self.reply({"errorCode": 0, "result": {"totalRows": len(data), "data": data}})
+        elif f"/gateways/{GATEWAY_MAC}/wan-status" in self.path:
+            self.reply({"errorCode": 0, "result": [{"name": "WAN1", "ip": WAN_IP, "wanPortIpv4Config": {"ip": WAN_IP}}]})
         else:
             self.reply({"errorCode": -1, "msg": f"unexpected GET {self.path}"})
 
