@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.3.2...v1.4.0) (2026-10-24)
+
+
+### Features
+
+* Alert when the gateway's WAN IP changes or isn't the expected one ([#33](https://github.com/JimmyMultani/omada-usage-monitor/issues/33)) ([565b627](https://github.com/JimmyMultani/omada-usage-monitor/commit/565b6274e4fd415751fdb93a2ea6b873b5aa7a6f))
+
 ## [1.3.2](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.3.1...v1.3.2) (2026-10-23)
 
 
