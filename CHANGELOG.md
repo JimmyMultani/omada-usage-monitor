@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.4.0...v1.4.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* Update base image to Python 3.14.10 and unblock its Dependabot updates ([#35](https://github.com/JimmyMultani/omada-usage-monitor/issues/35)) ([28665c3](https://github.com/JimmyMultani/omada-usage-monitor/commit/28665c36b5c9f9dd498c7d07de925baaba0cc29c))
+
 ## [1.4.0](https://github.com/JimmyMultani/omada-usage-monitor/compare/v1.3.2...v1.4.0) (2026-10-24)
 
 
