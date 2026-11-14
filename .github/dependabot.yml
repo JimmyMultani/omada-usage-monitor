@@ -19,6 +19,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The default 3-day cooldown never expires for python:3.14-alpine, which
+    # is rebuilt more often than that, so base image updates would stall.
+    # CI (unit tests on the image and the smoke test) still gates each one.
+    cooldown:
+      exclude: ["python"]
+    # Move to a new Python minor version deliberately, not via a patch release.
+    ignore:
+      - dependency-name: "python"
+        versions: [">= 3.15"]
     commit-message:
       prefix: fix
     labels: [fix]
